@@ -492,27 +492,62 @@ async function convertText(section, item, to) {
 
 // ---------- text editor ----------
 
-const TEXT_EXT = ['txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'xml', 'yaml', 'yml', 'toml', 'ini', 'conf', 'cfg', 'log',
-  'html', 'htm', 'css', 'js', 'ts', 'jsx', 'tsx', 'py', 'rs', 'go', 'java', 'kt', 'c', 'h', 'cpp', 'hpp', 'cs', 'php', 'rb',
-  'sh', 'bat', 'ps1', 'sql', 'env', 'gitignore', 'srt'];
+// Extension -> highlight.js language. Text files without one still get line numbers.
+const CODE_LANG = {
+  rs: 'rust', py: 'python', pyw: 'python', js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
+  ts: 'typescript', tsx: 'typescript', mts: 'typescript', c: 'c', h: 'cpp', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp',
+  hh: 'cpp', ino: 'cpp', cs: 'csharp', java: 'java', kt: 'kotlin', kts: 'kotlin', go: 'go', php: 'php', rb: 'ruby',
+  swift: 'swift', m: 'objectivec', lua: 'lua', pl: 'perl', r: 'r', vb: 'vbnet', sh: 'bash', bash: 'bash', zsh: 'bash',
+  ps1: 'powershell', psm1: 'powershell', bat: 'dos', cmd: 'dos', sql: 'sql', html: 'xml', htm: 'xml', xml: 'xml',
+  svg: 'xml', vue: 'xml', xaml: 'xml', csproj: 'xml', plist: 'xml', css: 'css', scss: 'scss', less: 'less',
+  json: 'json', jsonc: 'json', yaml: 'yaml', yml: 'yaml', toml: 'ini', ini: 'ini', conf: 'ini', cfg: 'ini',
+  env: 'ini', properties: 'ini', md: 'markdown', markdown: 'markdown', diff: 'diff', patch: 'diff',
+  graphql: 'graphql', gql: 'graphql', mk: 'makefile', gradle: 'kotlin',
+};
+const TEXT_EXT = [...new Set([...Object.keys(CODE_LANG), 'txt', 'csv', 'tsv', 'log', 'gitignore', 'srt', 'vtt', 'nfo'])];
 const MAX_TEXT_EDIT = 2 * 1024 * 1024;
+// Beyond this, re-highlighting on every keystroke lags on a phone: plain text with line numbers.
+const MAX_HIGHLIGHT = 300 * 1024;
 
 function isTextFile(name) {
   return TEXT_EXT.includes(splitName(name)[1]);
 }
 
-/** Full-screen document view, shared by the text editor and notes. */
-const doc = { onClose: null, onInput: null, slide: 'up' };
+let highlighter = null;
+/** highlight.js (~130 KB) is loaded the first time a code file is opened. */
+function loadHighlighter() {
+  highlighter ||= new Promise((resolve, reject) => {
+    const s = el('script', { src: 'highlight.js' });
+    s.onload = () => resolve(window.hljs);
+    s.onerror = () => { highlighter = null; reject(new Error('highlight.js')); };
+    document.head.append(s);
+  });
+  return highlighter;
+}
 
-async function openDocView({ title, text, mono, left, right, status = '', slide = 'up', onInput, onClose }) {
+const CODE_PREFS_KEY = 'lp-code';
+const codePrefs = (() => {
+  // A phone is too narrow for long lines: wrap by default there.
+  const defaults = { wrap: matchMedia('(max-width: 720px)').matches, size: 13.5 };
+  try { return { ...defaults, ...JSON.parse(localStorage.getItem(CODE_PREFS_KEY) || '{}') }; } catch { return defaults; }
+})();
+function saveCodePrefs() {
+  try { localStorage.setItem(CODE_PREFS_KEY, JSON.stringify(codePrefs)); } catch { /* private mode */ }
+}
+
+/** Full-screen document view, shared by the text editor and notes. */
+const doc = { onClose: null, onInput: null, slide: 'up', code: false, lang: null, hljs: null, indent: '    ', lines: 0, frame: 0 };
+
+async function openDocView({ title, text, mono, lang = null, left, right, status = '', slide = 'up', onInput, onClose }) {
   const view = $('#doc'), area = $('#doc-text');
   $('#doc-title').textContent = title;
   $('#doc-left').textContent = left;
   $('#doc-status').textContent = status;
   $('#doc-right').replaceChildren(...right);
   area.value = text;
-  area.classList.toggle('mono', mono);
-  Object.assign(doc, { onClose, onInput, slide });
+  area.scrollTop = area.scrollLeft = 0;
+  Object.assign(doc, { onClose, onInput, slide, code: mono, lang, hljs: null, lines: 0 });
+  setCodeMode(mono, text);
   const from = slide === 'left' ? 'translateX(100%)' : 'translateY(100%)';
   await enter(view, [{ transform: from }, { transform: 'none' }], 'smooth');
 }
@@ -520,23 +555,215 @@ async function openDocView({ title, text, mono, left, right, status = '', slide 
 async function closeDocView() {
   const to = doc.slide === 'left' ? 'translateX(100%)' : 'translateY(100%)';
   await leave($('#doc'), [{ transform: 'none' }, { transform: to }], 'smooth', { duration: 380 });
+  lockZoom(false);
+}
+
+/** iOS zooms the page into any field under 16px when it gets focus; code wants smaller text. */
+function lockZoom(on) {
+  const meta = document.querySelector('meta[name=viewport]');
+  const base = 'width=device-width, initial-scale=1, viewport-fit=cover';
+  meta.content = on && IS_IOS ? `${base}, maximum-scale=1` : base;
+}
+
+function setCodeMode(on, text) {
+  const view = $('#doc'), area = $('#doc-text');
+  view.classList.toggle('code', on);
+  $('#code-bar').hidden = $('#code-hl').hidden = !on;
+  // Autocorrect and capitals break code; notes keep them.
+  for (const [k, v] of [['spellcheck', 'false'], ['autocapitalize', 'off'], ['autocorrect', 'off'], ['autocomplete', 'off']]) {
+    if (on) area.setAttribute(k, v); else area.removeAttribute(k);
+  }
+  if (!on) { area.spellcheck = true; $('#code-gutter').hidden = true; return; }
+  lockZoom(true);
+  area.setSelectionRange(0, 0);   // code opens at the top, not with the caret at the end
+  doc.indent = detectIndent(text);
+  $('#code-lang').textContent = 'Текст';
+  applyCodePrefs();
+  renderCode();
+  if (doc.lang && text.length <= MAX_HIGHLIGHT) {
+    const lang = doc.lang;
+    loadHighlighter().then((hljs) => {
+      if (doc.lang !== lang || !hljs.getLanguage(lang)) return;
+      doc.hljs = hljs;
+      $('#code-lang').textContent = hljs.getLanguage(lang).name;
+      renderCode();
+    }).catch(() => {});
+  }
+  updateCursorPos();
+}
+
+function applyCodePrefs() {
+  const view = $('#doc');
+  view.classList.toggle('wrap', codePrefs.wrap);
+  view.style.setProperty('--code-size', `${codePrefs.size}px`);
+  $('#code-wrap').classList.toggle('on', codePrefs.wrap);
+  // Line numbers can't follow wrapped lines.
+  $('#code-gutter').hidden = codePrefs.wrap;
+  doc.lines = 0;
+}
+
+/** Tabs if the file indents with tabs, otherwise the smallest space indent seen (2–8), 4 by default. */
+function detectIndent(text) {
+  let tabs = 0, spaces = 0, min = 0;
+  for (const line of text.split('\n', 2000)) {
+    if (line[0] === '\t') tabs++;
+    else if (line[0] === ' ') {
+      const n = line.length - line.trimStart().length;
+      if (n >= 2 && line.trim()) { spaces++; min = min ? Math.min(min, n) : n; }
+    }
+  }
+  if (tabs > spaces) return '\t';
+  return ' '.repeat(min >= 2 && min <= 8 ? min : 4);
+}
+
+/** Redraws the highlighted copy and line numbers, at most once a frame. */
+function renderCode() {
+  if (!doc.code) return;
+  cancelAnimationFrame(doc.frame);
+  doc.frame = requestAnimationFrame(() => {
+    const area = $('#doc-text'), pre = $('#code-hl'), text = area.value;
+    // The trailing newline keeps the copy as tall as the textarea when the text ends with one.
+    if (doc.hljs && text.length <= MAX_HIGHLIGHT) {
+      pre.innerHTML = `${doc.hljs.highlight(text, { language: doc.lang, ignoreIllegals: true }).value}\n`;
+    } else {
+      pre.textContent = `${text}\n`;
+    }
+    if (!codePrefs.wrap) renderGutter(text);
+    syncCodeScroll();
+  });
+}
+
+function renderGutter(text) {
+  let lines = 1;
+  for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) lines++;
+  if (lines === doc.lines) return;
+  doc.lines = lines;
+  const nums = new Array(lines);
+  for (let i = 0; i < lines; i++) nums[i] = i + 1;
+  $('#code-gutter').textContent = nums.join('\n');
+  $('#doc-body').style.setProperty('--gut', `${String(lines).length + 2}ch`);
+}
+
+function syncCodeScroll() {
+  const area = $('#doc-text');
+  $('#code-hl').style.transform = `translate(${-area.scrollLeft}px, ${-area.scrollTop}px)`;
+  $('#code-gutter').style.transform = `translateY(${-area.scrollTop}px)`;
+  // Wrapped lines must break at the same width as the textarea's (its scrollbar included).
+  if (codePrefs.wrap) $('#code-hl').style.width = `${area.clientWidth}px`;
+  else $('#code-hl').style.removeProperty('width');
+}
+
+function updateCursorPos() {
+  if (!doc.code) return;
+  const area = $('#doc-text');
+  const before = area.value.slice(0, area.selectionStart);
+  const line = before.split('\n').length;
+  const col = before.length - before.lastIndexOf('\n');
+  const sel = area.selectionEnd - area.selectionStart;
+  $('#code-pos').textContent = `Стр ${line}, кол ${col}${sel ? ` · выделено ${sel}` : ''}`;
+}
+
+/** Inserts text keeping the browser's undo history. */
+function insertText(area, text) {
+  if (!document.execCommand('insertText', false, text)) {
+    area.setRangeText(text, area.selectionStart, area.selectionEnd, 'end');
+    area.dispatchEvent(new Event('input'));
+  }
+}
+
+/** Tab / Shift+Tab: indents or outdents every selected line (or types an indent at the cursor). */
+function indentSelection(area, outdent) {
+  const v = area.value, s = area.selectionStart, e = area.selectionEnd;
+  if (s === e && !outdent) return insertText(area, doc.indent);
+  const start = v.lastIndexOf('\n', s - 1) + 1;
+  let end = v.indexOf('\n', e > s && v[e - 1] === '\n' ? e - 1 : e);
+  if (end === -1) end = v.length;
+  const width = doc.indent === '\t' ? 4 : doc.indent.length;
+  const lines = v.slice(start, end).split('\n');
+  const out = lines.map((l) => {
+    if (!outdent) return l ? doc.indent + l : l;
+    if (l[0] === '\t') return l.slice(1);
+    return l.slice(Math.min(width, l.length - l.replace(/^ +/, '').length));
+  }).join('\n');
+  if (out === v.slice(start, end)) return;
+  area.setSelectionRange(start, end);
+  insertText(area, out);
+  if (s === e) {
+    const moved = out.split('\n')[0].length - lines[0].length;
+    area.setSelectionRange(Math.max(start, s + moved), Math.max(start, s + moved));
+  } else {
+    area.setSelectionRange(start, start + out.length);
+  }
+}
+
+/** Enter keeps the line's indent, plus one level after an opening bracket or a colon. */
+function newlineWithIndent(area) {
+  const v = area.value, s = area.selectionStart;
+  const line = v.slice(v.lastIndexOf('\n', s - 1) + 1, s);
+  let indent = line.match(/^[ \t]*/)[0];
+  if (/[{[(:]\s*$/.test(line)) indent += doc.indent;
+  insertText(area, `\n${indent}`);
+}
+
+async function goToLine() {
+  const area = $('#doc-text');
+  const total = area.value.split('\n').length;
+  const answer = await promptDialog(`Перейти к строке (1–${total})`, '', { ok: 'Перейти' });
+  const n = parseInt(answer, 10);
+  if (!n) return;
+  const lines = area.value.split('\n');
+  const line = Math.min(Math.max(n, 1), lines.length);
+  let pos = 0;
+  for (let i = 0; i < line - 1; i++) pos += lines[i].length + 1;
+  area.focus();
+  area.setSelectionRange(pos, pos + lines[line - 1].length);
+  // Put the line a third of the way down, not at the very edge.
+  const lh = parseFloat(getComputedStyle(area).lineHeight) || 20;
+  if (!codePrefs.wrap) area.scrollTop = Math.max(0, (line - 1) * lh - area.clientHeight / 3);
+  updateCursorPos();
+}
+
+function setCodeSize(delta) {
+  codePrefs.size = Math.min(24, Math.max(10, codePrefs.size + delta));
+  saveCodePrefs();
+  applyCodePrefs();
+  renderCode();
 }
 
 function bindDocView() {
   const area = $('#doc-text');
   $('#doc-left').addEventListener('click', () => doc.onClose?.());
-  area.addEventListener('input', () => doc.onInput?.(area.value));
+  area.addEventListener('input', () => { doc.onInput?.(area.value); renderCode(); updateCursorPos(); });
+  area.addEventListener('scroll', () => { if (doc.code) syncCodeScroll(); }, { passive: true });
+  for (const ev of ['keyup', 'pointerup', 'select', 'focus']) area.addEventListener(ev, updateCursorPos);
+  new ResizeObserver(() => { if (doc.code) syncCodeScroll(); }).observe(area);
   area.addEventListener('keydown', (e) => {
-    // Tab inserts spaces instead of leaving the field (editor behaviour).
-    if (e.key === 'Tab' && area.classList.contains('mono')) {
-      e.preventDefault();
-      if (!document.execCommand('insertText', false, '  ')) area.setRangeText('  ', area.selectionStart, area.selectionEnd, 'end');
-    }
-    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+    const mod = e.metaKey || e.ctrlKey;
+    if (mod && e.key === 's') {
       e.preventDefault();
       $('#doc-right').querySelector('[data-save]')?.click();
     }
+    if (e.key === 'Escape') { e.preventDefault(); doc.onClose?.(); }
+    if (!doc.code || e.isComposing) return;
+    if (e.key === 'Tab' && !mod && !e.altKey) { e.preventDefault(); indentSelection(area, e.shiftKey); }
+    else if (e.key === 'Enter' && !mod && !e.shiftKey && !e.altKey) { e.preventDefault(); newlineWithIndent(area); }
+    else if (mod && e.key === 'g') { e.preventDefault(); goToLine(); }
+    else if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); setCodeSize(1); }
+    else if (mod && e.key === '-') { e.preventDefault(); setCodeSize(-1); }
+    else if (e.altKey && e.code === 'KeyZ') { e.preventDefault(); $('#code-wrap').click(); }
   });
+  $('#code-wrap').addEventListener('click', () => {
+    codePrefs.wrap = !codePrefs.wrap;
+    saveCodePrefs();
+    applyCodePrefs();
+    renderCode();
+  });
+  $('#code-bigger').addEventListener('click', () => setCodeSize(1));
+  $('#code-smaller').addEventListener('click', () => setCodeSize(-1));
+  $('#code-goto').addEventListener('click', goToLine);
+  // A phone keyboard has no Tab key.
+  $('#code-tab').addEventListener('pointerdown', (e) => e.preventDefault());   // keep the keyboard open
+  $('#code-tab').addEventListener('click', () => { area.focus(); indentSelection(area, false); });
 }
 
 async function openTextEditor(section, item) {
@@ -562,7 +789,8 @@ async function openTextEditor(section, item) {
     }
   };
   await openDocView({
-    title: item.name, text: original, mono: true, left: 'Закрыть', right: [save], slide: 'up',
+    title: item.name, text: original, mono: true, lang: CODE_LANG[splitName(item.name)[1]] || null,
+    left: 'Закрыть', right: [save], slide: 'up',
     onInput: (v) => {
       current = v;
       save.disabled = v === original;

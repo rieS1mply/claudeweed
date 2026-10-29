@@ -61,6 +61,11 @@
       </div>
     </div>
     <div class="summary" id="summary"></div>
+    <label class="search" id="search-box">
+      <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></svg>
+      <input id="search" type="search" placeholder="Поиск" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Поиск по имени">
+      <kbd class="search-key" aria-hidden="true">/</kbd>
+    </label>
   </div>
   <main id="content" class="content"></main>
 
@@ -237,7 +242,23 @@
     </div>
     <div class="doc-right" id="doc-right"></div>
   </div>
-  <textarea id="doc-text" spellcheck="true"></textarea>
+  <!-- Code files only: language, cursor position, wrapping, font size, go to line. -->
+  <div class="code-bar" id="code-bar" hidden>
+    <span class="code-lang" id="code-lang"></span>
+    <span class="code-pos" id="code-pos"></span>
+    <span class="ed-spacer"></span>
+    <button class="code-tool touch-only" id="code-tab" type="button" title="Отступ">⇥</button>
+    <button class="code-tool" id="code-goto" type="button" title="Перейти к строке (Ctrl+G)">Строка</button>
+    <button class="code-tool" id="code-wrap" type="button" title="Перенос строк (Alt+Z)">Перенос</button>
+    <button class="code-tool" id="code-smaller" type="button" title="Мельче (Ctrl+−)">A−</button>
+    <button class="code-tool" id="code-bigger" type="button" title="Крупнее (Ctrl+=)">A+</button>
+  </div>
+  <div class="doc-body" id="doc-body">
+    <!-- A highlighted copy of the text under a transparent textarea: native typing, selection and undo. -->
+    <div class="code-gutter" id="code-gutter" aria-hidden="true" hidden></div>
+    <pre class="code-hl" id="code-hl" aria-hidden="true" hidden></pre>
+    <textarea id="doc-text" spellcheck="true"></textarea>
+  </div>
 </div>
 
 <div id="drop" class="drop" hidden><div class="drop-card glass">Отпустите, чтобы загрузить</div></div>

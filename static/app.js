@@ -780,6 +780,49 @@ function showSectionHeader() {
   $('#nav-title').textContent = name;
   $('#head-action').hidden = true;
   $('#select-btn').hidden = !(state.section === 'photos' || state.section === 'files');
+  // Each section starts unfiltered; render() shows the field once there is something to search.
+  $('#search').value = '';
+  $('#search-box').hidden = true;
+}
+
+// ---------- search ----------
+
+const normalize = (s) => s.toLowerCase().replace(/ё/g, 'е');
+
+/** Words typed in the search field; an item matches if its text contains all of them. */
+function searchWords() {
+  return normalize($('#search').value).split(/\s+/).filter(Boolean);
+}
+
+function filterByQuery(items, textOf) {
+  const words = searchWords();
+  if (!words.length) return items;
+  return items.filter((item) => {
+    const text = normalize(textOf(item));
+    return words.every((w) => text.includes(w));
+  });
+}
+
+function nothingFound() {
+  return el('div', { class: 'empty' },
+    el('div', { text: 'Ничего не найдено' }),
+    el('div', { class: 'hint', text: `По запросу «${$('#search').value.trim()}»` }));
+}
+
+function bindSearch() {
+  const input = $('#search');
+  let frame = 0;
+  input.addEventListener('input', () => {
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(() => { exitSelection(); render(); });
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      if (input.value) { input.value = ''; render(); } else input.blur();
+    }
+    if (e.key === 'Enter') input.blur();   // hides the phone keyboard
+  });
 }
 
 // iOS bars: transparent until content scrolls under them; the small title
@@ -883,10 +926,13 @@ function render() {
   if (!list) return;
   if (section === 'notes') return renderNotes(list);
   if (section === 'trash') return renderTrash(list);
-  const { items, total_size } = list;
+  const { total_size } = list;
+  const all = list.items;
+  const items = filterByQuery(all, (i) => i.name);
   const content = $('#content');
 
-  const n = items.length;
+  const n = all.length;
+  $('#search-box').hidden = !n;
   const byAdded = sortOrder[section] === 'added';
   const action = $('#head-action');
   action.hidden = !n;
@@ -901,6 +947,12 @@ function render() {
       icon(section === 'photos' ? 'image' : 'cloud'),
       el('div', { text: 'Здесь пока пусто' }),
       el('div', { class: 'hint', text: 'Нажмите «+» или перетащите файлы в окно' })));
+    return;
+  }
+  if (items.length !== n) $('#summary').textContent = `Найдено ${items.length} из ${n}`;
+  if (!items.length) {
+    state.flat = [];
+    content.replaceChildren(nothingFound());
     return;
   }
 
@@ -960,9 +1012,10 @@ function renderFiles(items) {
       el('div', { class: 'file-icon', text: ext.slice(0, 4) || '—' }),
       el('div', { class: 'file-main' },
         el('div', { class: 'file-name', text: item.name }),
-        el('div', { class: 'file-meta', text: sortOrder.files === 'added'
-          ? `${fmtSize(item.size)} · загружен ${fmtDate(item.added)}`
-          : `${fmtSize(item.size)} · ${fmtDate(item.date)}` })),
+        // Two spans: one line on a phone, two columns on a wide screen.
+        el('div', { class: 'file-meta' },
+          el('span', { class: 'file-size', text: fmtSize(item.size) }),
+          el('span', { class: 'file-date', text: sortOrder.files === 'added' ? `загружен ${fmtDate(item.added)}` : fmtDate(item.date) }))),
       el('button', { class: 'btn round', title: 'Действия', onclick: (e) => { e.stopPropagation(); itemActions('files', item); } }, icon('more')));
     rows.set(item, row);
     nodeItem.set(row, item);
@@ -1422,6 +1475,25 @@ function bindUi() {
     if (item) itemActions('photos', item);
   });
   bindViewerGestures();
+  bindSearch();
+
+  // Desktop shortcuts on the main screen: "/" searches, 1–3 switch sections.
+  const typing = (t) => t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+  const overlayOpen = () => viewer.open || ['#modal', '#prompt', '#sheet', '#editor', '#doc'].some((s) => !$(s).hidden);
+  document.addEventListener('keydown', (e) => {
+    if ($('#app').hidden || overlayOpen() || typing(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === '/' && !$('#search-box').hidden) { e.preventDefault(); $('#search').focus(); }
+    else if (['1', '2', '3'].includes(e.key)) setSection(SECTIONS[Number(e.key) - 1]);
+  });
+  // Pasting a screenshot or copied files uploads them.
+  window.addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData?.files || [])];
+    if (!files.length || $('#app').hidden || overlayOpen() || typing(e.target)) return;
+    if (state.section !== 'photos' && state.section !== 'files') return;
+    e.preventDefault();
+    enqueueUploads(files.map((f, i) => (f.name && f.name !== 'image.png' ? f
+      : new File([f], `Вставка ${new Date().toISOString().slice(0, 19).replace('T', ' ').replace(/:/g, '-')}${i ? `-${i}` : ''}.${f.type.split('/')[1] || 'png'}`, { type: f.type }))));
+  });
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !$('#sheet').hidden) return $('#sheet-cancel').click();

@@ -31,6 +31,7 @@ function noteDate(ms) {
 function renderNotes(list) {
   const content = $('#content');
   const n = list.items.length;
+  $('#search-box').hidden = !n;
   $('#summary').textContent = n ? `${n} ${plural(n, 'заметка', 'заметки', 'заметок')}` : '';
   if (!n) {
     content.replaceChildren(el('div', { class: 'empty' },
@@ -39,8 +40,11 @@ function renderNotes(list) {
       el('div', { class: 'hint', text: 'Нажмите «+», чтобы создать. Заметки доступны с любого устройства' })));
     return;
   }
+  const found = filterByQuery(list.items, (note) => `${note.title}\n${note.preview || ''}`);
+  if (found.length !== n) $('#summary').textContent = `Найдено ${found.length} из ${n}`;
+  if (!found.length) return content.replaceChildren(nothingFound());
   const groups = new Map();
-  for (const note of list.items) {
+  for (const note of found) {
     const g = noteGroup(note.updated);
     if (!groups.has(g)) groups.set(g, []);
     groups.get(g).push(note);

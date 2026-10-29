@@ -51,6 +51,8 @@ cargo build --release
 & "$env:LOCALAPPDATA\Programs\local-photo\local-photo.exe" --stop
 Copy-Item target\release\local-photo.exe "$env:LOCALAPPDATA\Programs\local-photo\" -Force
 & "$env:LOCALAPPDATA\Programs\local-photo\local-photo.exe" --autostart on   # запускает в фоне
+# Не добавлять к этой команде `| Out-Null` и другие конвейеры: фоновое облако держит вывод и команда зависнет.
+# Адрес туннеля после запуска: `%APPDATA%/local-photo/status.json` (адрес trycloudflare).
 ```
 
 После перезапуска адрес trycloudflare меняется (придёт в Telegram).
@@ -69,7 +71,7 @@ Copy-Item target\release\local-photo.exe "$env:LOCALAPPDATA\Programs\local-photo
 | `src/telegram.rs`, `src/bot.rs` | Bot API и приём файлов из чата владельца |
 | `src/terminal.rs` | до 8 именованных PTY-сеансов (ConPTY на Windows), история, deflate-сжатие вывода; REST `/api/terminal/sessions` + WebSocket `/api/terminal?id=N` |
 | `src/trash.rs`, `src/notes.rs`, `src/zips.rs`, `src/thumbs.rs` | корзина 30 дней, заметки, ZIP, превью |
-| `static/app.js` | ядро интерфейса; `editor.js`, `notes.js`, `trash.js`, `select.js`, `terminal.js` — разделы |
+| `static/app.js` | ядро интерфейса, поиск, клавиши; `editor.js` (фото + редактор кода), `notes.js`, `trash.js`, `select.js`, `terminal.js` — разделы; `highlight.js` — сторонний, не править |
 | `static/start.js` | подключается последним и запускает приложение |
 
 Новый API-маршрут: обработчик в `web.rs`, регистрация в `router()` внутри `protected`
