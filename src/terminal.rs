@@ -1,18 +1,20 @@
-//! Remote terminal: one shell on this computer, shared by every open terminal tab.
+//! Remote terminal: up to `MAX_SESSIONS` named shells on this computer. Every browser
+//! tab or pane attached to the same session sees the same screen.
 //!
-//! The shell keeps running when the browser disconnects (a phone switching networks,
+//! A shell keeps running when the browser disconnects (a phone switching networks,
 //! a closed laptop lid); reconnecting replays the recent output, so the screen comes
 //! back as it was. Off unless `"terminal": true` in config.json — whoever knows the
 //! password controls the computer.
 //!
-//! Protocol over one WebSocket, binary frames only:
+//! Sessions are listed, created, renamed and closed over REST (`/api/terminal/sessions`);
+//! `/api/terminal?id=N` attaches to one. Protocol over that WebSocket, binary frames only:
 //! - server → client: terminal output, raw-deflate compressed as one continuous stream
 //!   (`?z=1`, sync flush per frame), or plain bytes;
 //! - client → server: `0` + input bytes, `1` + cols(u16 BE) + rows(u16 BE), `2` = kill the shell.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,6 +22,7 @@ use anyhow::{Context, Result};
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use flate2::{Compress, Compression, FlushCompress};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use serde::Serialize;
 use tokio::sync::{broadcast, watch};
 
 /// Output kept for replay on reconnect.
@@ -35,17 +38,84 @@ const PING_EVERY: Duration = Duration::from_secs(25);
 const PONG_TIMEOUT: Duration = Duration::from_secs(70);
 /// One Telegram message per address per this long, not one per reconnect.
 const NOTIFY_EVERY: Duration = Duration::from_secs(3600);
+/// Each shell is a process with its own history buffer; keep the total bounded.
+pub const MAX_SESSIONS: usize = 8;
+const MAX_NAME: usize = 40;
 
 /// WebSocket close codes the page understands.
 pub const CLOSE_RESYNC: u16 = 4000;
 pub const CLOSE_EXITED: u16 = 4001;
 pub const CLOSE_LOGGED_OUT: u16 = 4401;
 pub const CLOSE_DISABLED: u16 = 4403;
+/// The session was closed (from another device, or before this one reconnected).
+pub const CLOSE_GONE: u16 = 4404;
 
 #[derive(Default)]
 pub struct Terminal {
-    shell: Mutex<Option<Arc<Shell>>>,
+    sessions: Mutex<Sessions>,
     notified: Mutex<HashMap<String, Instant>>,
+}
+
+#[derive(Default)]
+struct Sessions {
+    last_id: u32,
+    /// In creation order: that's the order of the tabs.
+    list: Vec<Session>,
+}
+
+struct Session {
+    id: u32,
+    name: String,
+    shell: Arc<Shell>,
+}
+
+#[derive(Serialize)]
+pub struct SessionInfo {
+    pub id: u32,
+    pub name: String,
+    pub alive: bool,
+    /// Browser connections attached right now (other devices included).
+    pub clients: usize,
+}
+
+impl Session {
+    fn info(&self) -> SessionInfo {
+        SessionInfo {
+            id: self.id,
+            name: self.name.clone(),
+            alive: !self.shell.dead.load(Ordering::SeqCst),
+            clients: self.shell.clients.load(Ordering::SeqCst),
+        }
+    }
+
+    /// The shell, started afresh if it exited ("new session" in the same tab).
+    fn live_shell(&mut self) -> Result<Arc<Shell>> {
+        if self.shell.dead.load(Ordering::SeqCst) {
+            self.shell = Shell::spawn(default_shell())?;
+        }
+        Ok(self.shell.clone())
+    }
+}
+
+impl Sessions {
+    fn create(&mut self, name: Option<&str>) -> Result<&mut Session> {
+        if self.list.len() >= MAX_SESSIONS {
+            anyhow::bail!("Открыто максимум сеансов ({MAX_SESSIONS}). Закройте ненужный.");
+        }
+        let shell = Shell::spawn(default_shell())?;
+        self.last_id += 1;
+        let id = self.last_id;
+        let name = name.and_then(clean_name).unwrap_or_else(|| format!("Терминал {id}"));
+        self.list.push(Session { id, name, shell });
+        Ok(self.list.last_mut().unwrap())
+    }
+}
+
+/// Trimmed, single-line, at most `MAX_NAME` characters; None if nothing is left.
+fn clean_name(name: &str) -> Option<String> {
+    let name: String = name.chars().filter(|c| !c.is_control()).take(MAX_NAME).collect();
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 struct Shell {
@@ -57,24 +127,66 @@ struct Shell {
     output: broadcast::Sender<Arc<[u8]>>,
     exited: watch::Sender<bool>,
     dead: AtomicBool,
+    /// Closed on purpose: attached pages are told the session is gone, not that it exited.
+    gone: AtomicBool,
+    clients: AtomicUsize,
+}
+
+/// Counts a connection in `Shell::clients` while it lives.
+struct Attached(Arc<Shell>);
+
+impl Drop for Attached {
+    fn drop(&mut self) {
+        self.0.clients.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Terminal {
-    /// The running shell, or a new one if there is none (or the last one exited).
-    fn shell(&self) -> Result<Arc<Shell>> {
-        let mut slot = self.shell.lock().unwrap();
-        if let Some(s) = slot.as_ref().filter(|s| !s.dead.load(Ordering::SeqCst)) {
-            return Ok(s.clone());
-        }
-        let shell = Shell::spawn(default_shell())?;
-        *slot = Some(shell.clone());
-        Ok(shell)
+    pub fn list(&self) -> Vec<SessionInfo> {
+        self.sessions.lock().unwrap().list.iter().map(Session::info).collect()
     }
 
-    /// Ends the shell (and what runs in it) when the cloud stops.
+    pub fn create(&self, name: Option<&str>) -> Result<SessionInfo> {
+        let mut sessions = self.sessions.lock().unwrap();
+        Ok(sessions.create(name)?.info())
+    }
+
+    pub fn rename(&self, id: u32, name: &str) -> Option<SessionInfo> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let s = sessions.list.iter_mut().find(|s| s.id == id)?;
+        s.name = clean_name(name)?;
+        Some(s.info())
+    }
+
+    /// Kills the shell and everything running in it; attached pages see `CLOSE_GONE`.
+    pub fn close(&self, id: u32) -> bool {
+        let mut sessions = self.sessions.lock().unwrap();
+        let Some(i) = sessions.list.iter().position(|s| s.id == id) else {
+            return false;
+        };
+        let s = sessions.list.remove(i);
+        s.shell.gone.store(true, Ordering::SeqCst);
+        s.shell.kill();
+        true
+    }
+
+    /// Session `id`, or without one (a page from an older version) the first session,
+    /// created if there is none. None if `id` no longer exists.
+    fn shell(&self, id: Option<u32>) -> Result<Option<Arc<Shell>>> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = match id {
+            Some(id) => sessions.list.iter_mut().find(|s| s.id == id),
+            None if sessions.list.is_empty() => Some(sessions.create(None)?),
+            None => sessions.list.first_mut(),
+        };
+        session.map(Session::live_shell).transpose()
+    }
+
+    /// Ends every shell (and what runs in them) when the cloud stops or the terminal is turned off.
     pub fn shutdown(&self) {
-        if let Some(s) = self.shell.lock().unwrap().take() {
-            s.kill();
+        for s in self.sessions.lock().unwrap().list.drain(..) {
+            s.shell.gone.store(true, Ordering::SeqCst);
+            s.shell.kill();
         }
     }
 
@@ -132,6 +244,8 @@ impl Shell {
             output: broadcast::channel(BACKLOG).0,
             exited: watch::channel(false).0,
             dead: AtomicBool::new(false),
+            gone: AtomicBool::new(false),
+            clients: AtomicUsize::new(0),
         });
 
         // Writes to the shell can block (it isn't reading), so they get their own thread.
@@ -234,15 +348,21 @@ pub struct Client {
 }
 
 /// Runs one browser connection until it closes.
-pub async fn serve(term: Arc<Terminal>, mut ws: WebSocket, client: Client) {
-    let shell = match term.shell() {
-        Ok(s) => s,
+pub async fn serve(term: Arc<Terminal>, mut ws: WebSocket, client: Client, id: Option<u32>) {
+    let shell = match term.shell(id) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            let _ = ws.send(close(CLOSE_GONE, "gone")).await;
+            return;
+        }
         Err(e) => {
             crate::log!("Терминал: {e:#}");
             let _ = ws.send(close(CLOSE_EXITED, "не удалось запустить оболочку")).await;
             return;
         }
     };
+    shell.clients.fetch_add(1, Ordering::SeqCst);
+    let _attached = Attached(shell.clone());
     let (history, mut rx) = shell.attach();
     let mut exited = shell.exited.subscribe();
     let mut deflate = client.compress.then(Deflater::new);
@@ -265,7 +385,7 @@ pub async fn serve(term: Arc<Terminal>, mut ws: WebSocket, client: Client) {
                     Ok(chunk) => chunk.to_vec(),
                     // Too far behind: reconnecting replays the history, cheaper than the backlog.
                     Err(broadcast::error::RecvError::Lagged(_)) => break close(CLOSE_RESYNC, "resync"),
-                    Err(broadcast::error::RecvError::Closed) => break close(CLOSE_EXITED, "exited"),
+                    Err(broadcast::error::RecvError::Closed) => break exit_reason(&shell),
                 };
                 let deadline = tokio::time::Instant::now() + BATCH_WAIT;
                 while batch.len() < MAX_FRAME {
@@ -310,7 +430,7 @@ pub async fn serve(term: Arc<Terminal>, mut ws: WebSocket, client: Client) {
                         return;
                     }
                 }
-                break close(CLOSE_EXITED, "exited");
+                break exit_reason(&shell);
             }
             _ = ping.tick() => {
                 if let Some(code) = (client.still_allowed)() {
@@ -327,6 +447,14 @@ pub async fn serve(term: Arc<Terminal>, mut ws: WebSocket, client: Client) {
         }
     };
     let _ = ws.send(reason).await;
+}
+
+fn exit_reason(shell: &Shell) -> Message {
+    if shell.gone.load(Ordering::SeqCst) {
+        close(CLOSE_GONE, "gone")
+    } else {
+        close(CLOSE_EXITED, "exited")
+    }
 }
 
 fn close(code: u16, reason: &'static str) -> Message {
@@ -367,6 +495,33 @@ mod tests {
         let (history, _) = shell.attach();
         assert!(String::from_utf8_lossy(&history).contains("hello-from-pty"));
         assert!(shell.dead.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn session_names_are_cleaned() {
+        assert_eq!(clean_name("  сборка\n\t "), Some("сборка".into()));
+        assert_eq!(clean_name(" \x1b "), None);
+        assert_eq!(clean_name(&"я".repeat(100)).unwrap().chars().count(), MAX_NAME);
+    }
+
+    #[test]
+    fn sessions_are_limited_and_closed() {
+        let term = Terminal::default();
+        for _ in 0..MAX_SESSIONS {
+            term.create(None).unwrap();
+        }
+        assert!(term.create(Some("лишний")).is_err());
+        let ids: Vec<u32> = term.list().iter().map(|s| s.id).collect();
+        assert_eq!(ids, (1..=MAX_SESSIONS as u32).collect::<Vec<_>>());
+        assert_eq!(term.list()[0].name, "Терминал 1");
+        assert_eq!(term.rename(2, "логи").unwrap().name, "логи");
+        assert!(term.rename(2, "  ").is_none());
+        assert!(term.close(3));
+        assert!(!term.close(3));
+        assert!(term.shell(Some(3)).unwrap().is_none());
+        assert_eq!(term.create(None).unwrap().id, MAX_SESSIONS as u32 + 1, "ids are never reused");
+        term.shutdown();
+        assert!(term.list().is_empty());
     }
 
     #[test]

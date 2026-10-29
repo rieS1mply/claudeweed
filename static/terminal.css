@@ -1,4 +1,4 @@
-/* Terminal page: bar on top, the terminal, extra keys at the bottom (touch screens). */
+/* Terminal page: bar on top, session tabs, 1/2/4 windows, extra keys at the bottom (touch screens). */
 
 html, body.term-page { height: 100%; overflow: hidden; }
 body.term-page {
@@ -13,6 +13,7 @@ body.term-page {
   height: var(--nav-h); padding: 0 10px; flex-shrink: 0;
 }
 .term-title { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 17px; min-width: 0; }
+.term-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .term-traffic { font-weight: 400; font-size: 12px; color: var(--subtle); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .term-tools { display: flex; gap: 4px; margin-left: auto; }
 .term-tools .glass:hover { background: rgba(60, 60, 66, .6); }
@@ -23,7 +24,40 @@ body.term-page {
 .term-dot[data-state="closed"] { background: var(--danger); }
 @keyframes term-pulse { to { opacity: .3; } }
 
-.term-wrap { position: relative; flex: 1; min-height: 0; padding: 0 6px 6px 10px; }
+.term-tabs {
+  display: flex; gap: 4px; padding: 0 10px 6px; flex-shrink: 0;
+  overflow-x: auto; scrollbar-width: none;
+}
+.term-tabs::-webkit-scrollbar { display: none; }
+.term-tab {
+  display: flex; align-items: center; flex-shrink: 0; max-width: 200px;
+  border-radius: 9px; background: var(--fill); color: var(--muted);
+  border: .5px solid transparent;
+}
+.term-tab.shown { color: var(--text); }
+.term-tab.current { background: var(--fill-2); border-color: var(--hairline); }
+.term-tab.dead .term-tab-name { text-decoration: line-through; color: var(--subtle); }
+.term-tab button { border: 0; background: none; color: inherit; font: 500 13px var(--font); touch-action: manipulation; }
+.term-tab-name { padding: 6px 4px 6px 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; -webkit-user-select: none; user-select: none; }
+.term-tab-close { padding: 6px 9px 6px 4px; color: var(--subtle) !important; font-size: 15px !important; }
+.term-tab-close:hover { color: var(--danger) !important; }
+.term-new {
+  flex-shrink: 0; width: 32px; border: 0; border-radius: 9px;
+  background: var(--fill); color: var(--text); font: 400 18px var(--font);
+}
+.term-new:disabled { opacity: .35; }
+
+.term-wrap {
+  flex: 1; min-height: 0; padding: 0 6px 6px 10px;
+  display: grid; gap: 6px; grid-template: 1fr / 1fr;
+}
+.term-wrap[data-layout="2"] { grid-template: 1fr / 1fr 1fr; }
+.term-wrap[data-layout="4"] { grid-template: 1fr 1fr / 1fr 1fr; }
+/* Tall screens split top/bottom rather than into two narrow columns. */
+@media (max-aspect-ratio: 1/1) { .term-wrap[data-layout="2"] { grid-template: 1fr 1fr / 1fr; } }
+.term-pane { position: relative; min-width: 0; min-height: 0; border-radius: 8px; }
+.term-wrap:not([data-layout="1"]) .term-pane { padding: 4px; outline: 1px solid var(--hairline); }
+.term-wrap:not([data-layout="1"]) .term-pane.active { outline: 1px solid var(--accent); }
 .term { width: 100%; height: 100%; }
 .term .xterm { height: 100%; }
 .term .xterm-viewport { background: transparent !important; }
@@ -31,7 +65,7 @@ body.term-page {
 .term .xterm-viewport::-webkit-scrollbar-thumb { background: var(--fill-2); border-radius: 3px; }
 
 .term-overlay {
-  position: absolute; inset: 0;
+  position: absolute; inset: 0; z-index: 5;
   display: grid; place-items: center; padding: 20px;
   background: rgba(0, 0, 0, .55);
 }
@@ -39,6 +73,8 @@ body.term-page {
   max-width: 340px; padding: 20px; border-radius: 18px;
   display: grid; gap: 14px; text-align: center; line-height: 1.45;
 }
+#term-overlay { position: fixed; z-index: 10; }
+.term-msg-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .term-msg code { font-family: var(--mono); font-size: 13px; color: var(--text); }
 
 .term-keys {
@@ -63,3 +99,5 @@ body.term-page {
 @media (max-width: 420px) {
   .term-traffic { display: none; }
 }
+/* Phones get a single window (terminal.js), so no layout button. */
+@media (max-width: 699px) { .term-wide { display: none; } }

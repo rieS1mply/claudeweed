@@ -123,6 +123,8 @@ pub fn router(app: App) -> Router {
         )
         .route("/api/upload/{id}/finish", post(upload_finish))
         .route("/api/terminal", get(terminal_ws))
+        .route("/api/terminal/sessions", get(terminal_list).post(terminal_create))
+        .route("/api/terminal/sessions/{id}", put(terminal_rename).delete(terminal_close))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_session));
 
     Router::new()
@@ -417,10 +419,72 @@ async fn logout(State(app): State<App>, headers: HeaderMap) -> Response {
 struct TerminalQuery {
     #[serde(default)]
     z: Option<String>,
+    /// Session to attach to; absent from pages of older versions.
+    #[serde(default)]
+    id: Option<u32>,
+}
+
+/// Turned off with `--terminal off`: shells nobody is attached to must not keep running either.
+fn terminal_off(app: &App) -> bool {
+    if app.terminal_enabled() {
+        return false;
+    }
+    app.terminal.shutdown();
+    true
+}
+
+async fn terminal_list(State(app): State<App>) -> Response {
+    if terminal_off(&app) {
+        return not_found();
+    }
+    Json(json!({ "sessions": app.terminal.list(), "max": terminal::MAX_SESSIONS })).into_response()
+}
+
+#[derive(Deserialize, Default)]
+struct SessionName {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+async fn terminal_create(State(app): State<App>, headers: HeaderMap, body: Option<Json<SessionName>>) -> Response {
+    if terminal_off(&app) {
+        return not_found();
+    }
+    let name = body.map(|b| b.0).unwrap_or_default().name;
+    let term = app.terminal.clone();
+    match tokio::task::spawn_blocking(move || term.create(name.as_deref())).await {
+        Ok(Ok(info)) => {
+            crate::log!("Терминал: открыт сеанс «{}» (адрес: {})", info.name, auth::client_ip(&headers));
+            Json(info).into_response()
+        }
+        Ok(Err(e)) => error(StatusCode::CONFLICT, &format!("{e:#}")),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось открыть сеанс"),
+    }
+}
+
+async fn terminal_rename(State(app): State<App>, UrlPath(id): UrlPath<u32>, Json(body): Json<SessionName>) -> Response {
+    if terminal_off(&app) {
+        return not_found();
+    }
+    match app.terminal.rename(id, body.name.as_deref().unwrap_or("")) {
+        Some(info) => Json(info).into_response(),
+        None => error(StatusCode::BAD_REQUEST, "Сеанс не найден или пустое имя"),
+    }
+}
+
+async fn terminal_close(State(app): State<App>, headers: HeaderMap, UrlPath(id): UrlPath<u32>) -> Response {
+    if terminal_off(&app) {
+        return not_found();
+    }
+    if !app.terminal.close(id) {
+        return error(StatusCode::NOT_FOUND, "Сеанс не найден");
+    }
+    crate::log!("Терминал: сеанс {id} закрыт (адрес: {})", auth::client_ip(&headers));
+    Json(json!({ "ok": true })).into_response()
 }
 
 async fn terminal_ws(State(app): State<App>, headers: HeaderMap, Query(q): Query<TerminalQuery>, ws: WebSocketUpgrade) -> Response {
-    if !app.terminal_enabled() {
+    if terminal_off(&app) {
         return not_found();
     }
     // Browsers send Origin on every WebSocket; without this check any site the user
@@ -449,8 +513,9 @@ async fn terminal_ws(State(app): State<App>, headers: HeaderMap, Query(q): Query
         }),
     };
     let term = app.terminal.clone();
+    let id = q.id;
     ws.on_upgrade(move |socket| async move {
-        terminal::serve(term, socket, client).await;
+        terminal::serve(term, socket, client, id).await;
         crate::log!("Терминал: отключение (адрес: {ip})");
     })
 }

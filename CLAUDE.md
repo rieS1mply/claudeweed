@@ -8,6 +8,18 @@ Cloudflare (quick tunnel), адрес приходит в Telegram. Описан
 **PROJECT_LOG.md** — журнал проекта: экскурс, идеи в очереди и отклонённые, история сессий.
 Читать в начале сессии, обновлять в конце каждой.
 
+## Порядок после каждой задачи (просьба владельца, обязательно)
+
+1. Когда задача сделана и проверена (`cargo test`, `cargo clippy`), **сразу выкатить её на
+   настоящее облако** командами из раздела «Выкатить новую версию» ниже: остановить программу,
+   скопировать новый exe, запустить (`--autostart on`), проверить `--status` и что сайт отвечает
+   (`http://127.0.0.1:8787` и адрес trycloudflare). Владелец сам заходит на сайт и проверяет.
+   В ответе назвать новый адрес trycloudflare.
+2. **Коммит и пуш — самостоятельно**, без отдельной команды, после каждых 2–3 выполненных задач
+   (и всегда в конце сессии, если есть незакоммиченное): `git add` нужных файлов,
+   коммит с понятным русским описанием, `git push -u origin <ветка>`. Не коммитить `.dev/`,
+   `target/`, настройки и секреты из `%APPDATA%\local-photo\`.
+
 ## Команды
 
 ```sh
@@ -55,7 +67,7 @@ Copy-Item target\release\local-photo.exe "$env:LOCALAPPDATA\Programs\local-photo
 | `src/service.rs` | автозапуск (Windows Run / launchd / systemd), `status.json`, `--stop` |
 | `src/tunnel.rs` | скачивание и перезапуск cloudflared, фильтр повторяющихся ошибок |
 | `src/telegram.rs`, `src/bot.rs` | Bot API и приём файлов из чата владельца |
-| `src/terminal.rs` | общий PTY-сеанс (ConPTY на Windows), история, deflate-сжатие вывода |
+| `src/terminal.rs` | до 8 именованных PTY-сеансов (ConPTY на Windows), история, deflate-сжатие вывода; REST `/api/terminal/sessions` + WebSocket `/api/terminal?id=N` |
 | `src/trash.rs`, `src/notes.rs`, `src/zips.rs`, `src/thumbs.rs` | корзина 30 дней, заметки, ZIP, превью |
 | `static/app.js` | ядро интерфейса; `editor.js`, `notes.js`, `trash.js`, `select.js`, `terminal.js` — разделы |
 | `static/start.js` | подключается последним и запускает приложение |

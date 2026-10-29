@@ -21,7 +21,7 @@
   </a>
   <div class="term-title">
     <span class="term-dot" id="term-dot" data-state="connecting"></span>
-    <span>Терминал</span>
+    <span class="term-name" id="term-name">Терминал</span>
     <span class="term-traffic" id="term-traffic"></span>
   </div>
   <div class="term-tools">
@@ -31,23 +31,30 @@
     <button class="btn glass round" id="term-bigger" type="button" title="Крупнее">
       <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M12 6v12M6 12h12"/></svg>
     </button>
-    <button class="btn glass round" id="term-restart" type="button" title="Новый сеанс (закрыть оболочку)">
+    <button class="btn glass round term-wide" id="term-layout" type="button" title="Окна: 1 / 2 / 4">
+      <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>
+    </button>
+    <button class="btn glass round" id="term-restart" type="button" title="Перезапустить оболочку в этом окне">
       <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
     </button>
   </div>
 </header>
 
-<main class="term-wrap" id="term-wrap">
-  <div id="term" class="term"></div>
-  <div class="term-overlay" id="term-overlay" hidden>
-    <div class="term-msg glass">
-      <div id="term-msg-text"></div>
-      <button class="btn primary" id="term-msg-btn" type="button" hidden></button>
-    </div>
-  </div>
-</main>
+<!-- Sessions; double-click (long press on a phone) renames. -->
+<nav class="term-tabs" id="term-tabs" aria-label="Сеансы">
+  <button class="term-new" id="term-new" type="button" title="Новый сеанс">+</button>
+</nav>
 
-<!-- Keys a phone keyboard doesn't have. -->
+<main class="term-wrap" id="term-wrap" data-layout="1"></main>
+
+<div class="term-overlay" id="term-overlay" hidden>
+  <div class="term-msg glass">
+    <div class="term-msg-text"></div>
+    <div class="term-msg-actions"></div>
+  </div>
+</div>
+
+<!-- Keys a phone keyboard doesn't have; they go to the active window. -->
 <nav class="term-keys" id="term-keys" aria-label="Клавиши">
   <button data-key="esc">Esc</button>
   <button data-key="tab">Tab</button>
@@ -62,6 +69,18 @@
   <button data-key="/">/</button>
   <button data-key="-">-</button>
 </nav>
+
+<template id="pane-tpl">
+  <section class="term-pane">
+    <div class="term"></div>
+    <div class="term-overlay" hidden>
+      <div class="term-msg glass">
+        <div class="term-msg-text"></div>
+        <div class="term-msg-actions"></div>
+      </div>
+    </div>
+  </section>
+</template>
 
 <script src="xterm.js"></script>
 <script src="xterm-addon-fit.js"></script>
