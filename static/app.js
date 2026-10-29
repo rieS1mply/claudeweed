@@ -357,7 +357,7 @@ function putChunk(url, blob, onProgress) {
 
 const realApi = {
   session: () => request('/api/session', { allow401: true }),
-  login: (username, password) => request('/api/login', { method: 'POST', json: { username, password }, allow401: true }),
+  login: (username, password, code) => request('/api/login', { method: 'POST', json: { username, password, code }, allow401: true }),
   logout: () => request('/api/logout', { method: 'POST' }),
   list: (section) => request(`/api/list?${qs({ section })}`),
   remove: (section, item) => request(`/api/file?${qs({ section, path: item.path })}`, { method: 'DELETE' }),
@@ -703,16 +703,27 @@ async function onLogin(e) {
   const btn = $('#login-submit');
   err.hidden = true;
   btn.disabled = true;
+  const codeBox = $('#login-code-box');
+  const code = codeBox.hidden ? undefined : form.code.value.replace(/\s/g, '');
   try {
-    await api.login(form.username.value.trim(), form.password.value);
-    form.password.value = '';
+    await api.login(form.username.value.trim(), form.password.value, code);
+    form.password.value = form.code.value = '';
+    codeBox.hidden = true;
     const a = await animate(form, [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(1.06)' }], 'snappy', { duration: 260 });
     showApp();
     a?.cancel?.();
   } catch (ex) {
+    // Right password, the server wants the authenticator code too: ask, without shaking.
+    if (ex.data?.need_code && codeBox.hidden) {
+      codeBox.hidden = false;
+      enter(codeBox, [{ opacity: 0, transform: 'translateY(-6px)' }, { opacity: 1, transform: 'none' }], 'smooth');
+      form.code.focus();
+      return;
+    }
     err.textContent = ex.message;
     err.hidden = false;
     shake(form);
+    if (ex.data?.need_code) { form.code.value = ''; form.code.focus(); }
   } finally {
     btn.disabled = false;
   }

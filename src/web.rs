@@ -24,7 +24,7 @@ use tower_http::services::ServeFile;
 use crate::auth::{self, Auth};
 use crate::config::{Config, Paths};
 use crate::storage::{self, Kind, Section};
-use crate::{notes, telegram, terminal, thumbs, trash, zips};
+use crate::{notes, telegram, terminal, thumbs, totp, trash, zips};
 
 /// Matches CHUNK_SIZE in app.js, with headroom.
 const MAX_CHUNK: usize = 20 * 1024 * 1024;
@@ -49,6 +49,8 @@ pub struct AppState {
     place_lock: Mutex<()>,
     zips: zips::Jobs,
     pub terminal: Arc<terminal::Terminal>,
+    /// Last authenticator step accepted at login: the same code can't log in twice.
+    totp_last_step: std::sync::Mutex<u64>,
 }
 
 struct Upload {
@@ -76,6 +78,7 @@ impl AppState {
             place_lock: Mutex::new(()),
             zips: Default::default(),
             terminal: Default::default(),
+            totp_last_step: Default::default(),
         })
     }
 
@@ -86,6 +89,11 @@ impl AppState {
     /// Read from config.json on every use, so `--terminal off` works without a restart.
     fn terminal_enabled(&self) -> bool {
         Config::load(&self.paths.config).ok().flatten().map_or(self.config.terminal, |c| c.terminal)
+    }
+
+    /// Also read live: `--2fa on` takes effect for the next login without a restart.
+    fn totp_secret(&self) -> Option<String> {
+        Config::load(&self.paths.config).ok().flatten().map_or_else(|| self.config.totp_secret.clone(), |c| c.totp_secret)
     }
 
     /// Folder of a section by its API name, including "notes".
@@ -359,6 +367,9 @@ async fn session(State(app): State<App>, headers: HeaderMap) -> Response {
 struct LoginBody {
     username: String,
     password: String,
+    /// Authenticator code; sent on the second try once the server asked for it.
+    #[serde(default)]
+    code: Option<String>,
 }
 
 async fn login(State(app): State<App>, headers: HeaderMap, Json(body): Json<LoginBody>) -> Response {
@@ -387,6 +398,29 @@ async fn login(State(app): State<App>, headers: HeaderMap, Json(body): Json<Logi
         crate::log!("Неудачная попытка входа (адрес: {ip})");
         tokio::time::sleep(Duration::from_millis(500)).await;
         return error(StatusCode::UNAUTHORIZED, "Неверный логин или пароль");
+    }
+
+    if let Some(secret) = app.totp_secret() {
+        let code = body.code.as_deref().map(str::trim).unwrap_or("");
+        if code.is_empty() {
+            // Not a failure: the page now shows the code field and sends everything again.
+            return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "Введите код из приложения", "need_code": true }))).into_response();
+        }
+        let accepted = totp::verify(&secret, code, totp::unix_now()).filter(|&step| {
+            let mut last = app.totp_last_step.lock().unwrap();
+            let fresh = step > *last;
+            if fresh {
+                *last = step;
+            }
+            fresh
+        });
+        if accepted.is_none() {
+            // Counts like a wrong password, so codes can't be guessed either.
+            app.auth.record_failure(&ip);
+            crate::log!("Неверный код второго фактора (адрес: {ip})");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "Неверный или устаревший код", "need_code": true }))).into_response();
+        }
     }
 
     app.auth.record_success(&ip);

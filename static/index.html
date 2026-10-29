@@ -21,6 +21,10 @@
       <input name="username" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="Логин" required>
       <input name="password" type="password" autocomplete="current-password" placeholder="Пароль" required>
     </div>
+    <!-- Shown once the server asks for it (`local-photo --2fa on`). -->
+    <div class="inset-group" id="login-code-box" hidden>
+      <input name="code" id="login-code" inputmode="numeric" pattern="[0-9 ]*" maxlength="7" autocomplete="one-time-code" placeholder="Код из приложения" aria-label="Код из приложения">
+    </div>
     <div class="login-error" id="login-error" hidden></div>
     <button type="submit" class="btn primary wide" id="login-submit">Войти</button>
   </form>

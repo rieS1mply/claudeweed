@@ -64,10 +64,12 @@ Copy-Item target\release\local-photo.exe "$env:LOCALAPPDATA\Programs\local-photo
 | `src/main.rs` | разбор флагов, запуск сервера, туннеля и бота, остановка |
 | `src/web.rs` | все HTTP-маршруты (`router()`), CSRF, заголовки безопасности, загрузка по частям |
 | `src/auth.rs` | сессии (на диске только SHA-256 токенов), защита от подбора пароля |
+| `src/totp.rs` | второй фактор входа: коды из приложения (TOTP), `--2fa on` в `main.rs` |
+| `src/backup.rs` | ежедневная резервная копия хранилища (`--backup`), состояние в `backup.json` |
 | `src/storage.rs` | разделы Фото/Файлы, даты из EXIF/MP4, `sanitize_filename`, `resolve` (защита путей) |
 | `src/config.rs` | папки, `config.json`, интерактивная первая настройка |
 | `src/service.rs` | автозапуск (Windows Run / launchd / systemd), `status.json`, `--stop` |
-| `src/tunnel.rs` | скачивание и перезапуск cloudflared, фильтр повторяющихся ошибок |
+| `src/tunnel.rs` | скачивание и перезапуск cloudflared: быстрый туннель или именованный (`--tunnel named`), фильтр повторяющихся ошибок |
 | `src/telegram.rs`, `src/bot.rs` | Bot API и приём файлов из чата владельца |
 | `src/terminal.rs` | до 8 именованных PTY-сеансов (ConPTY на Windows), история, deflate-сжатие вывода; REST `/api/terminal/sessions` + WebSocket `/api/terminal?id=N` |
 | `src/trash.rs`, `src/notes.rs`, `src/zips.rs`, `src/thumbs.rs` | корзина 30 дней, заметки, ZIP, превью |

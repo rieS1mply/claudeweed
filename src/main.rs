@@ -5,6 +5,7 @@
 //! tunnel; the public address is printed and sent to Telegram on every start.
 
 mod auth;
+mod backup;
 mod bot;
 mod config;
 mod logging;
@@ -15,6 +16,7 @@ mod telegram;
 mod terminal;
 mod thumbs;
 mod trash;
+mod totp;
 mod tunnel;
 mod web;
 mod zips;
@@ -47,6 +49,20 @@ struct Args {
     stop: bool,
     autostart: Option<bool>,
     terminal: Option<bool>,
+    two_factor: Option<bool>,
+    /// `Some(None)` = `--backup off`.
+    backup: Option<Option<PathBuf>>,
+    backup_now: bool,
+    /// `Some(true)` = named tunnel (asked interactively), `Some(false)` = back to quick.
+    named_tunnel: Option<bool>,
+}
+
+fn on_off(value: Option<String>, flag: &str) -> Result<bool> {
+    match value.as_deref() {
+        Some("on") => Ok(true),
+        Some("off") => Ok(false),
+        _ => bail!("после {flag} нужно on или off"),
+    }
 }
 
 const HELP: &str = "\
@@ -59,7 +75,13 @@ local-photo — домашнее облако для фото и файлов
   --stop              остановить облако, работающее в фоне
   --autostart on|off  запускать облако само при входе в систему (в фоне) / не запускать
   --terminal on|off   разрешить / запретить терминал этого компьютера на сайте
-  --setup             выбрать папку хранилища, задать логин, пароль и Telegram заново
+  --2fa on|off        вход с кодом из приложения (Google Authenticator и др.) / без кода
+  --backup <папка>    каждый день копировать хранилище в эту папку (лучше другой диск)
+  --backup off        не делать резервную копию
+  --backup-now        сделать резервную копию прямо сейчас
+  --tunnel named      постоянный адрес: туннель Cloudflare со своим доменом (спросит токен)
+  --tunnel quick      снова случайный адрес trycloudflare.com (без аккаунта)
+  --setup            выбрать папку хранилища, задать логин, пароль и Telegram заново
   --port <порт>       локальный порт (по умолчанию 8787)
   --no-tunnel         не открывать доступ из интернета (только http://127.0.0.1)
   --dir <папка>       держать настройки в этой папке (переносная/тестовая установка)
@@ -67,7 +89,10 @@ local-photo — домашнее облако для фото и файлов
 ";
 
 fn parse_args() -> Result<Args> {
-    let mut args = Args { dir: None, setup: false, no_tunnel: false, port: None, background: false, status: false, stop: false, autostart: None, terminal: None };
+    let mut args = Args {
+        dir: None, setup: false, no_tunnel: false, port: None, background: false, status: false, stop: false,
+        autostart: None, terminal: None, two_factor: None, backup: None, backup_now: false, named_tunnel: None,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -78,18 +103,19 @@ fn parse_args() -> Result<Args> {
             "--background" => args.background = true,
             "--status" => args.status = true,
             "--stop" => args.stop = true,
-            "--autostart" => {
-                args.autostart = Some(match it.next().as_deref() {
-                    Some("on") => true,
-                    Some("off") => false,
-                    _ => bail!("после --autostart нужно on или off"),
-                })
+            "--autostart" => args.autostart = Some(on_off(it.next(), "--autostart")?),
+            "--terminal" => args.terminal = Some(on_off(it.next(), "--terminal")?),
+            "--2fa" => args.two_factor = Some(on_off(it.next(), "--2fa")?),
+            "--backup" => {
+                let v = it.next().context("после --backup нужна папка или off")?;
+                args.backup = Some((v != "off").then(|| config::parse_folder(&v)));
             }
-            "--terminal" => {
-                args.terminal = Some(match it.next().as_deref() {
-                    Some("on") => true,
-                    Some("off") => false,
-                    _ => bail!("после --terminal нужно on или off"),
+            "--backup-now" => args.backup_now = true,
+            "--tunnel" => {
+                args.named_tunnel = Some(match it.next().as_deref() {
+                    Some("named") => true,
+                    Some("quick") => false,
+                    _ => bail!("после --tunnel нужно named или quick"),
                 })
             }
             "-h" | "--help" => {
@@ -149,10 +175,122 @@ async fn print_status(config_dir: &Path) -> Result<()> {
         None => println!("Облако не запущено."),
     }
     println!("  Автозапуск:  {autostart}");
-    let terminal = Config::load(&config_dir.join(config::CONFIG_FILE)).ok().flatten().is_some_and(|c| c.terminal);
+    let config = Config::load(&config_dir.join(config::CONFIG_FILE)).ok().flatten();
+    let terminal = config.as_ref().is_some_and(|c| c.terminal);
     println!("  Терминал:    {}", if terminal { "включён (--terminal off — выключить)" } else { "выключен" });
+    let two_factor = config.as_ref().is_some_and(|c| c.totp_secret.is_some());
+    println!("  Вход:        {}", if two_factor { "пароль + код из приложения" } else { "только пароль (--2fa on — добавить код)" });
+    let address = match config.as_ref().and_then(|c| c.named_tunnel.as_ref()) {
+        Some(t) => format!("постоянный, {}", t.url),
+        None => "случайный trycloudflare.com (--tunnel named — постоянный)".into(),
+    };
+    println!("  Адрес:       {address}");
+    match config.as_ref().and_then(|c| c.backup_dir.as_ref()) {
+        None => println!("  Копия:       не делается (--backup <папка> — включить)"),
+        Some(dir) => {
+            let st = backup::State::load(config_dir);
+            let last = if st.last_ok > 0 { backup::fmt_time(st.last_ok) } else { "ещё не было".into() };
+            println!("  Копия:       {} · последняя удачная: {last} · файлов: {}", dir.join(backup::COPY_DIR).display(), st.files);
+            if let Some(err) = st.error {
+                println!("               последняя ошибка: {err}");
+            }
+        }
+    }
     println!("  Журнал:      {}", config_dir.join("local-photo.log").display());
     service::pause_if_own_window();
+    Ok(())
+}
+
+/// `--2fa on`: shows a QR for the authenticator app and turns it on only after a correct code,
+/// so a mistyped setup can't lock the owner out.
+fn set_two_factor(config: &mut Config, on: bool) -> Result<()> {
+    if !on {
+        config.totp_secret = None;
+        println!("Вход по коду выключен: на сайте снова достаточно логина и пароля.");
+        return Ok(());
+    }
+    let secret = totp::new_secret();
+    let url = totp::otpauth_url(&secret, &config.username);
+    println!("Откройте приложение-аутентификатор (Google Authenticator, Microsoft Authenticator,");
+    println!("2FAS, Aegis…), нажмите «+» и отсканируйте этот QR-код:");
+    if let Some(qr) = service::qr(&url) {
+        for line in qr.lines() {
+            println!("   {line}");
+        }
+    }
+    println!("Или введите ключ вручную: {secret}");
+    for _ in 0..3 {
+        let code = config::ask("Код из приложения (6 цифр): ")?;
+        if totp::verify(&secret, &code, totp::unix_now()).is_some() {
+            config.totp_secret = Some(secret);
+            println!("Готово: вход на сайт теперь требует код из приложения.");
+            println!("Уже открытые на устройствах сеансы остаются. Выключить: local-photo --2fa off");
+            return Ok(());
+        }
+        println!("Код не подошёл. Проверьте, что время на телефоне и компьютере выставлено автоматически.");
+    }
+    bail!("вход по коду не включён: три неверных кода")
+}
+
+fn set_backup(config: &mut Config, target: Option<&Path>) -> Result<()> {
+    let Some(target) = target else {
+        config.backup_dir = None;
+        println!("Резервная копия выключена. Уже сделанная копия остаётся на месте.");
+        return Ok(());
+    };
+    let storage = config.storage_dir.clone().context("сначала настройте облако")?;
+    if !target.is_dir() {
+        bail!("папки {} нет. Создайте её (или подключите диск) и повторите", target.display());
+    }
+    backup::check_target(&storage, target)?;
+    // absolute(), not canonicalize(): no verbatim `\\?\` prefix on Windows in config.json and messages.
+    let target = std::path::absolute(target).unwrap_or_else(|_| target.to_path_buf());
+    config.backup_dir = Some(target.clone());
+    println!("Резервная копия: каждый день в {}", target.join(backup::COPY_DIR).display());
+    println!("Копируются новые и изменённые файлы; удалённые в облаке остаются в копии.");
+    if backup::same_disk(&storage, &target) {
+        println!("Внимание: это тот же диск, что и хранилище. Если диск сломается, пропадёт и копия.");
+        println!("Надёжнее — другой диск или внешний диск.");
+    }
+    println!("Первая копия начнётся через несколько минут после запуска облака (или сейчас: --backup-now).");
+    Ok(())
+}
+
+fn set_tunnel(config: &mut Config, named: bool) -> Result<()> {
+    if !named {
+        config.named_tunnel = None;
+        println!("Снова случайный адрес trycloudflare.com. Перезапустите облако: --stop, затем --autostart on");
+        return Ok(());
+    }
+    println!("Постоянный адрес — туннель Cloudflare на вашем домене (домен должен быть добавлен в Cloudflare).");
+    println!("1. https://one.dash.cloudflare.com → Networks → Tunnels → Create a tunnel → Cloudflared.");
+    println!("2. Скопируйте токен из команды установки (длинная строка после --token или «eyJ…»).");
+    println!("3. Public Hostname: ваш адрес (например cloud.example.com), Service: HTTP, localhost:{}", config.port);
+    let url = config::ask("Адрес (например https://cloud.example.com): ")?;
+    let url = if url.starts_with("https://") { url } else { format!("https://{}", url.trim_start_matches("http://")) };
+    let url = url.trim_end_matches('/').to_string();
+    if url.len() <= "https://".len() || url.contains(char::is_whitespace) {
+        bail!("неверный адрес");
+    }
+    let token = config::ask_password("Токен туннеля (не отображается): ")?;
+    // Pasted from "cloudflared service install <token>" or "--token <token>": keep the token only.
+    let token = token.split_whitespace().last().unwrap_or("").to_string();
+    if token.len() < 40 {
+        bail!("это не похоже на токен туннеля (он длинный, обычно начинается с eyJ)");
+    }
+    config.named_tunnel = Some(config::NamedTunnel { token, url: url.clone() });
+    println!("Сохранено. Перезапустите облако (--stop, затем --autostart on): сайт будет на {url}");
+    Ok(())
+}
+
+async fn backup_now(config: &Config, config_dir: &Path) -> Result<()> {
+    let target = config.backup_dir.clone().context("папка копии не задана: local-photo --backup <папка>")?;
+    let storage = config.storage_dir.clone().context("сначала настройте облако")?;
+    println!("Копирую {} → {} …", storage.display(), target.join(backup::COPY_DIR).display());
+    match backup::run_and_record(config_dir, &storage, &target).await.0 {
+        Ok(r) => println!("Готово: {}", backup::describe(&r)),
+        Err(e) => bail!("{e}"),
+    }
     Ok(())
 }
 
@@ -187,6 +325,24 @@ async fn run() -> Result<()> {
         } else {
             println!("Терминал выключен. Открытые сеансы закроются в течение 30 секунд.");
         }
+        return Ok(());
+    }
+    if args.two_factor.is_some() || args.backup.is_some() || args.backup_now || args.named_tunnel.is_some() {
+        let mut config = Config::load(&config_file)?.context("сначала настройте облако: запустите программу без параметров")?;
+        if let Some(on) = args.two_factor {
+            set_two_factor(&mut config, on)?;
+        }
+        if let Some(target) = &args.backup {
+            set_backup(&mut config, target.as_deref())?;
+        }
+        if let Some(named) = args.named_tunnel {
+            set_tunnel(&mut config, named)?;
+        }
+        config.save(&config_file)?;
+        if args.backup_now {
+            backup_now(&config, &config_dir).await?;
+        }
+        service::pause_if_own_window();
         return Ok(());
     }
     if let Some(on) = args.autostart {
@@ -315,6 +471,17 @@ async fn run() -> Result<()> {
     });
     let terminal = app.terminal.clone();
     let router = web::router(app);
+    let backups = tokio::spawn(backup::schedule(config_file.clone(), config_dir.clone(), paths.storage.clone(), config.telegram.clone()));
+    let tunnel_mode = match &config.named_tunnel {
+        Some(t) => {
+            // The dashboard forwards to a fixed port; a different one here would break the address.
+            if addr.port() != config.port {
+                log!("Внимание: порт {} занят, облако на {} — постоянный адрес не будет работать, пока порт не освободится", config.port, addr.port());
+            }
+            tunnel::Mode::Named { token: t.token.clone(), url: t.url.clone() }
+        }
+        None => tunnel::Mode::Quick,
+    };
 
     let tunnel = if args.no_tunnel {
         log!("Туннель отключён (--no-tunnel): сайт доступен только с этого компьютера");
@@ -335,7 +502,7 @@ async fn run() -> Result<()> {
                 }
             };
             log!("Открываю туннель Cloudflare…");
-            tunnel::run(bin, port, move |url| {
+            tunnel::run(bin, port, tunnel_mode, move |url| {
                 *public_url.lock().unwrap() = Some(url.clone());
                 {
                     let mut st = status.lock().unwrap();
@@ -374,7 +541,7 @@ async fn run() -> Result<()> {
 
     terminal.shutdown();
     // Dropping the task kills cloudflared (kill_on_drop).
-    for t in tunnel.into_iter().chain(bot) {
+    for t in tunnel.into_iter().chain(bot).chain(Some(backups)) {
         t.abort();
         let _ = t.await;
     }

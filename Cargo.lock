@@ -581,6 +581,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -935,6 +944,7 @@ dependencies = [
  "flate2",
  "fs4",
  "getrandom 0.2.17",
+ "hmac",
  "image",
  "kamadak-exif",
  "mime_guess",
@@ -945,6 +955,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "sha1",
  "sha2 0.10.9",
  "tar",
  "tokio",

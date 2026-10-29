@@ -125,6 +125,23 @@ pub struct Config {
     /// Terminal of this computer on the site. Off unless the owner turns it on.
     #[serde(default)]
     pub terminal: bool,
+    /// Base32 secret of the authenticator app (`--2fa on`); login then also asks for its code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totp_secret: Option<String>,
+    /// Daily copy of the storage goes here (`--backup <folder>`), ideally another disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_dir: Option<PathBuf>,
+    /// A named Cloudflare tunnel with a permanent address instead of a random trycloudflare one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_tunnel: Option<NamedTunnel>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct NamedTunnel {
+    /// From the Cloudflare dashboard (Zero Trust → Networks → Tunnels). Secret: never logged.
+    pub token: String,
+    /// The public hostname set up for that tunnel, e.g. https://cloud.example.com.
+    pub url: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -234,7 +251,7 @@ pub fn hash_password(password: &str) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("argon2: {e}"))
 }
 
-fn ask(prompt: &str) -> Result<String> {
+pub fn ask(prompt: &str) -> Result<String> {
     print!("{prompt}");
     io::stdout().flush()?;
     let mut line = String::new();
@@ -242,10 +259,11 @@ fn ask(prompt: &str) -> Result<String> {
         // Started as a service (systemd, autostart) before the first setup was done.
         bail!("нет ввода с клавиатуры — первую настройку нужно пройти, запустив программу в терминале");
     }
-    Ok(line.trim().to_string())
+    // Windows pipes and some pastes start with a byte-order mark; it is not part of the answer.
+    Ok(line.trim().trim_start_matches('\u{feff}').trim().to_string())
 }
 
-fn ask_password(prompt: &str) -> Result<String> {
+pub fn ask_password(prompt: &str) -> Result<String> {
     // Hidden input in a real terminal; plain line when input is piped (scripts, tests).
     if io::stdin().is_terminal() {
         Ok(rpassword::prompt_password(prompt)?)
@@ -401,6 +419,10 @@ pub async fn setup(path: &Path, previous: Option<&Config>, suggestion: Option<&P
         port: previous.map_or(DEFAULT_PORT, |c| c.port),
         telegram,
         terminal,
+        // Re-running setup changes the login, not these (each has its own command).
+        totp_secret: previous.and_then(|c| c.totp_secret.clone()),
+        backup_dir: previous.and_then(|c| c.backup_dir.clone()),
+        named_tunnel: previous.and_then(|c| c.named_tunnel.clone()),
     };
     config.save(path)?;
     println!();
@@ -471,7 +493,7 @@ mod tests {
         let old_system = base.join(SYSTEM_DIR);
         std::fs::create_dir_all(old_system.join("trash/abc")).unwrap();
         std::fs::create_dir_all(base.join(LEGACY_STORAGE_DIR).join("Фото")).unwrap();
-        let cfg = Config { storage_dir: None, username: "u".into(), password_hash: "h".into(), port: 1, telegram: None, terminal: false };
+        let cfg = Config { storage_dir: None, username: "u".into(), password_hash: "h".into(), port: 1, telegram: None, terminal: false, totp_secret: None, backup_dir: None, named_tunnel: None };
         cfg.save(&old_system.join(CONFIG_FILE)).unwrap();
         let config_dir = base.join("settings");
 

@@ -104,16 +104,25 @@ async fn download(dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Which tunnel to keep up.
+#[derive(Clone)]
+pub enum Mode {
+    /// Free, no account; a new random trycloudflare.com address on every start.
+    Quick,
+    /// A tunnel made in the Cloudflare dashboard: always the same address (needs a domain there).
+    Named { token: String, url: String },
+}
+
 /// Runs cloudflared forever, restarting it when it exits. `on_url` is called with
 /// the public address every time a (new) tunnel comes up.
-pub async fn run<F>(bin: PathBuf, port: u16, on_url: F)
+pub async fn run<F>(bin: PathBuf, port: u16, mode: Mode, on_url: F)
 where
     F: Fn(String) + Send + Sync + 'static,
 {
     let mut backoff = Duration::from_secs(5);
     loop {
         let started = Instant::now();
-        if let Err(e) = run_once(&bin, port, &on_url).await {
+        if let Err(e) = run_once(&bin, port, &mode, &on_url).await {
             crate::log!("Туннель: {e:#}");
         }
         // A tunnel that lived for a while was fine; restart quickly. Otherwise back off
@@ -127,9 +136,19 @@ where
     }
 }
 
-async fn run_once<F: Fn(String)>(bin: &Path, port: u16, on_url: &F) -> Result<()> {
+async fn run_once<F: Fn(String)>(bin: &Path, port: u16, mode: &Mode, on_url: &F) -> Result<()> {
     let mut cmd = Command::new(bin);
-    cmd.args(["tunnel", "--no-autoupdate", "--url", &format!("http://127.0.0.1:{port}")])
+    match mode {
+        Mode::Quick => {
+            cmd.args(["tunnel", "--no-autoupdate", "--url", &format!("http://127.0.0.1:{port}")]);
+        }
+        // Where it forwards to is set in the dashboard (Service: http://localhost:<port>).
+        // The token goes through the environment: arguments are visible to every process.
+        Mode::Named { token, .. } => {
+            cmd.args(["tunnel", "--no-autoupdate", "run"]).env("TUNNEL_TOKEN", token);
+        }
+    }
+    cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -144,7 +163,10 @@ async fn run_once<F: Fn(String)>(bin: &Path, port: u16, on_url: &F) -> Result<()
     // The URL is printed before the tunnel is actually connected. Announce it only once
     // cloudflared has registered a connection (and DNS had a moment): a link opened too
     // early fails, and phones then cache "domain not found" for minutes.
-    let mut pending: Option<String> = None;
+    let mut pending: Option<String> = match mode {
+        Mode::Quick => None,
+        Mode::Named { url, .. } => Some(url.clone()),
+    };
     let mut announced = false;
     let mut repeats = RepeatFilter::default();
     while let Some(line) = lines.next_line().await? {
