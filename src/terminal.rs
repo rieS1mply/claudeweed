@@ -14,7 +14,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,8 @@ use flate2::{Compress, Compression, FlushCompress};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tokio::sync::{broadcast, watch};
+
+use crate::terminal_store::{self as store, ClaudeRun, CwdTracker};
 
 /// Output kept for replay on reconnect.
 const HISTORY: usize = 128 * 1024;
@@ -54,6 +57,8 @@ pub const CLOSE_GONE: u16 = 4404;
 pub struct Terminal {
     sessions: Mutex<Sessions>,
     notified: Mutex<HashMap<String, Instant>>,
+    /// Folder the sessions are saved to (see `terminal_store`); None in tests.
+    store: Mutex<Option<PathBuf>>,
 }
 
 #[derive(Default)]
@@ -67,6 +72,10 @@ struct Session {
     id: u32,
     name: String,
     shell: Arc<Shell>,
+    /// Claude Code seen running in the shell at the last save.
+    claude: Option<ClaudeRun>,
+    /// `Shell::generation` of the output saved last time.
+    saved_output: u64,
 }
 
 #[derive(Serialize)]
@@ -91,7 +100,10 @@ impl Session {
     /// The shell, started afresh if it exited ("new session" in the same tab).
     fn live_shell(&mut self) -> Result<Arc<Shell>> {
         if self.shell.dead.load(Ordering::SeqCst) {
-            self.shell = Shell::spawn(default_shell())?;
+            // The folder may be gone since (or not a folder: `cd HKCU:` reports a registry path).
+            let cwd = self.shell.cwd.lock().unwrap().clone().filter(|d| d.is_dir());
+            self.shell = Shell::spawn(default_shell(cwd.as_deref()))?;
+            self.claude = None;
         }
         Ok(self.shell.clone())
     }
@@ -102,11 +114,11 @@ impl Sessions {
         if self.list.len() >= MAX_SESSIONS {
             anyhow::bail!("Открыто максимум сеансов ({MAX_SESSIONS}). Закройте ненужный.");
         }
-        let shell = Shell::spawn(default_shell())?;
+        let shell = Shell::spawn(default_shell(None))?;
         self.last_id += 1;
         let id = self.last_id;
         let name = name.and_then(clean_name).unwrap_or_else(|| format!("Терминал {id}"));
-        self.list.push(Session { id, name, shell });
+        self.list.push(Session { id, name, shell, claude: None, saved_output: 0 });
         Ok(self.list.last_mut().unwrap())
     }
 }
@@ -120,6 +132,12 @@ fn clean_name(name: &str) -> Option<String> {
 
 struct Shell {
     input: std::sync::mpsc::Sender<Vec<u8>>,
+    pid: Option<u32>,
+    /// Folder the shell is in (from its prompt on Windows, from the process elsewhere).
+    cwd: Mutex<Option<PathBuf>>,
+    cwd_tracker: Mutex<CwdTracker>,
+    /// Bumped on every output, so unchanged sessions aren't written again.
+    generation: AtomicU64,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     /// Recent output; locked together with `subscribe` so a new client sees every byte exactly once.
@@ -182,12 +200,101 @@ impl Terminal {
         session.map(Session::live_shell).transpose()
     }
 
-    /// Ends every shell (and what runs in them) when the cloud stops or the terminal is turned off.
+    /// Ends every shell (and what runs in them) when the cloud stops. Saved sessions stay
+    /// on disk and come back on the next start.
     pub fn shutdown(&self) {
         for s in self.sessions.lock().unwrap().list.drain(..) {
             s.shell.gone.store(true, Ordering::SeqCst);
             s.shell.kill();
         }
+    }
+
+    /// The terminal was turned off: end every shell and forget the saved ones too.
+    pub fn disable(&self) {
+        self.shutdown();
+        if let Some(dir) = self.store.lock().unwrap().as_ref() {
+            store::forget(dir);
+        }
+    }
+
+    /// Sets where sessions are saved and, if `start`, brings back the ones saved last time
+    /// (each in its folder, with its old output; Claude Code resumed where it was).
+    pub fn restore(&self, dir: &Path, start: bool) {
+        *self.store.lock().unwrap() = Some(dir.to_path_buf());
+        if !start {
+            return;
+        }
+        let saved = store::load(dir);
+        let mut sessions = self.sessions.lock().unwrap();
+        if !sessions.list.is_empty() {
+            return;
+        }
+        sessions.last_id = sessions.last_id.max(saved.last_id);
+        for s in saved.sessions.into_iter().take(MAX_SESSIONS) {
+            let cwd = s.claude.as_ref().and_then(|c| c.cwd.clone()).or(s.cwd).filter(|d| d.is_dir());
+            let shell = match Shell::spawn(default_shell(cwd.as_deref())) {
+                Ok(sh) => sh,
+                Err(e) => {
+                    crate::log!("Терминал: сеанс «{}» не восстановлен: {e:#}", s.name);
+                    continue;
+                }
+            };
+            let mut replay = store::load_output(dir, s.id);
+            if !replay.is_empty() {
+                // Reset colours, leave a full-screen program's screen, then a marker line.
+                replay.extend_from_slice("\x1b[0m\x1b[?1049l\r\n\x1b[2m--- облако перезапущено, сеанс восстановлен ---\x1b[0m\r\n".as_bytes());
+                shell.prepend_history(&replay);
+            }
+            if let Some(run) = &s.claude {
+                let line = store::resume_command(run);
+                crate::log!("Терминал: в сеансе «{}» снова запускаю Claude ({line})", s.name);
+                let _ = shell.input.send(format!("{line}\r").into_bytes());
+            }
+            sessions.last_id = sessions.last_id.max(s.id);
+            sessions.list.push(Session { id: s.id, name: s.name, shell, claude: s.claude, saved_output: 0 });
+        }
+        if !sessions.list.is_empty() {
+            crate::log!("Терминал: восстановлено сеансов: {}", sessions.list.len());
+        }
+    }
+
+    /// Writes the open sessions to disk (blocking: looks at the process tree). Called every
+    /// few seconds, so a power cut or a reboot loses only the last moments.
+    pub fn save(&self) {
+        let Some(dir) = self.store.lock().unwrap().clone() else { return };
+        let shells: Vec<(u32, u32, Option<ClaudeRun>)> = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions
+                .list
+                .iter()
+                .filter(|s| !s.shell.dead.load(Ordering::SeqCst))
+                .filter_map(|s| Some((s.id, s.shell.pid?, s.claude.clone())))
+                .collect()
+        };
+        let mut found = if shells.is_empty() { HashMap::new() } else { store::scan(&shells) };
+        let mut sessions = self.sessions.lock().unwrap();
+        let mut saved = store::Saved { last_id: sessions.last_id, sessions: Vec::new() };
+        for s in sessions.list.iter_mut() {
+            if let Some(f) = found.remove(&s.id) {
+                if !cfg!(windows) && f.cwd.is_some() {
+                    *s.shell.cwd.lock().unwrap() = f.cwd;
+                }
+                s.claude = f.claude;
+            }
+            let generation = s.shell.generation.load(Ordering::SeqCst);
+            if generation != s.saved_output {
+                store::save_output(&dir, s.id, &s.shell.attach().0);
+                s.saved_output = generation;
+            }
+            saved.sessions.push(store::SavedSession {
+                id: s.id,
+                name: s.name.clone(),
+                cwd: s.shell.cwd.lock().unwrap().clone(),
+                claude: s.claude.clone(),
+            });
+        }
+        drop(sessions);
+        store::save(&dir, &saved);
     }
 
     /// True once per address per hour: worth a Telegram message.
@@ -202,18 +309,27 @@ impl Terminal {
     }
 }
 
-/// The user's login shell (macOS/Linux), PowerShell on Windows. Starts in the home folder.
-fn default_shell() -> CommandBuilder {
+/// The user's login shell (macOS/Linux), PowerShell on Windows. Starts in `cwd`, or the home folder.
+fn default_shell(cwd: Option<&Path>) -> CommandBuilder {
     #[cfg(windows)]
     let mut cmd = {
         let mut c = CommandBuilder::new("powershell.exe");
-        c.arg("-NoLogo");
+        // The prompt reports its folder, so the session can come back there after a restart.
+        c.args(["-NoLogo", "-NoExit", "-EncodedCommand", &store::ps_hook_encoded()]);
         c
     };
     #[cfg(not(windows))]
     let mut cmd = CommandBuilder::new_default_prog();
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        cmd.cwd(home);
+    match cwd {
+        Some(dir) => cmd.cwd(dir),
+        None => {
+            if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+                cmd.cwd(home);
+            }
+        }
+    }
+    for var in store::inherited_agent_vars() {
+        cmd.env_remove(var);
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -230,6 +346,7 @@ impl Shell {
         let pair = native_pty_system()
             .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
             .context("не удалось открыть терминал")?;
+        let start_dir = cmd.get_cwd().map(PathBuf::from);
         let mut child = pair.slave.spawn_command(cmd).context("не удалось запустить оболочку")?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader()?;
@@ -238,6 +355,10 @@ impl Shell {
 
         let shell = Arc::new(Shell {
             input,
+            pid: child.process_id(),
+            cwd: Mutex::new(start_dir),
+            cwd_tracker: Default::default(),
+            generation: AtomicU64::new(0),
             killer: Mutex::new(child.clone_killer()),
             master: Mutex::new(Some(pair.master)),
             history: Mutex::new(VecDeque::with_capacity(HISTORY)),
@@ -284,8 +405,19 @@ impl Shell {
     }
 
     fn push_output(&self, bytes: &[u8]) {
+        if let Some(dir) = self.cwd_tracker.lock().unwrap().push(bytes) {
+            *self.cwd.lock().unwrap() = Some(dir);
+        }
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let stripped = strip_cursor_queries(bytes);
+        // ConPTY asks for the cursor position at start and waits for the answer: with nobody
+        // watching (a session restored after a restart) the shell would hang until a browser
+        // connects, so it is answered here.
+        if stripped.len() != bytes.len() && self.clients.load(Ordering::SeqCst) == 0 {
+            let _ = self.input.send(CURSOR_REPLY.to_vec());
+        }
         let mut history = self.history.lock().unwrap();
-        history.extend(bytes);
+        history.extend(stripped.iter());
         if history.len() > HISTORY {
             let mut cut = history.len() - HISTORY;
             // Start the replay at a line boundary rather than mid-escape-sequence.
@@ -295,6 +427,20 @@ impl Shell {
             history.drain(..cut);
         }
         let _ = self.output.send(bytes.into());
+    }
+
+    /// Output from before a restart, shown above what the new shell prints.
+    fn prepend_history(&self, old: &[u8]) {
+        let mut history = self.history.lock().unwrap();
+        let mut start = old.len().saturating_sub(HISTORY / 2);
+        if start > 0 {
+            if let Some(nl) = old[start..].iter().take(4096).position(|&b| b == b'\n') {
+                start += nl + 1;
+            }
+        }
+        for &b in strip_cursor_queries(&old[start..]).iter().rev() {
+            history.push_front(b);
+        }
     }
 
     fn attach(&self) -> (Vec<u8>, broadcast::Receiver<Arc<[u8]>>) {
@@ -312,6 +458,30 @@ impl Shell {
     fn kill(&self) {
         let _ = self.killer.lock().unwrap().kill();
     }
+}
+
+/// "Where is the cursor?" (DSR 6). A browser answers it as typed input.
+const CURSOR_QUERY: &[u8] = b"\x1b[6n";
+const CURSOR_REPLY: &[u8] = b"\x1b[1;1R";
+
+/// Output without cursor queries, for the replay: a query there was answered when it was
+/// live, and xterm.js answering it again on every reconnect sends a stray reply to the
+/// shell, which then swallows the next key typed (`claude` ran as `laude`).
+fn strip_cursor_queries(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if !bytes.windows(CURSOR_QUERY.len()).any(|w| w == CURSOR_QUERY) {
+        return bytes.into();
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(CURSOR_QUERY) {
+            i += CURSOR_QUERY.len();
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    out.into()
 }
 
 /// Raw deflate, one context per connection: repeated prompts and colors compress to almost nothing.
@@ -436,7 +606,7 @@ pub async fn serve(term: Arc<Terminal>, mut ws: WebSocket, client: Client, id: O
                 if let Some(code) = (client.still_allowed)() {
                     if code == CLOSE_DISABLED {
                         // Turned off while running: nobody should keep a shell.
-                        term.shutdown();
+                        term.disable();
                     }
                     break close(code, "");
                 }
@@ -495,6 +665,13 @@ mod tests {
         let (history, _) = shell.attach();
         assert!(String::from_utf8_lossy(&history).contains("hello-from-pty"));
         assert!(shell.dead.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn cursor_queries_are_left_out_of_the_replay() {
+        assert_eq!(&*strip_cursor_queries(b"plain"), b"plain");
+        assert_eq!(&*strip_cursor_queries(b"\x1b[6n\x1b[?25lPS> \x1b[6n"), b"\x1b[?25lPS> ");
+        assert_eq!(&*strip_cursor_queries(b"\x1b[6"), b"\x1b[6");
     }
 
     #[test]

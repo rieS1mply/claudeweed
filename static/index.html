@@ -8,7 +8,13 @@
 <meta name="theme-color" content="#000000">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Облако">
+<meta name="mobile-web-app-capable" content="yes">
 <title>Облако</title>
+<!-- "Add to Home Screen": opens full screen, without the browser bars. -->
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -258,15 +264,36 @@
     <span class="code-pos" id="code-pos"></span>
     <span class="ed-spacer"></span>
     <button class="code-tool touch-only" id="code-tab" type="button" title="Отступ">⇥</button>
+    <button class="code-tool" id="code-find" type="button" title="Найти и заменить (Ctrl+F, Ctrl+H)">Найти</button>
     <button class="code-tool" id="code-goto" type="button" title="Перейти к строке (Ctrl+G)">Строка</button>
     <button class="code-tool" id="code-wrap" type="button" title="Перенос строк (Alt+Z)">Перенос</button>
     <button class="code-tool" id="code-smaller" type="button" title="Мельче (Ctrl+−)">A−</button>
     <button class="code-tool" id="code-bigger" type="button" title="Крупнее (Ctrl+=)">A+</button>
   </div>
+  <!-- Find and replace in the open file. -->
+  <div class="find-bar" id="find-bar" hidden>
+    <div class="find-row">
+      <input id="find-input" type="search" placeholder="Найти" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" aria-label="Найти">
+      <span class="find-count" id="find-count"></span>
+      <button class="code-tool" id="find-prev" type="button" title="Предыдущее (Shift+Enter)">↑</button>
+      <button class="code-tool" id="find-next" type="button" title="Следующее (Enter)">↓</button>
+      <button class="code-tool" id="find-case" type="button" title="Учитывать регистр">Aa</button>
+      <button class="code-tool" id="find-regex" type="button" title="Регулярное выражение">.*</button>
+      <button class="code-tool" id="find-toggle" type="button" title="Заменить (Ctrl+H)">⇄</button>
+      <button class="code-tool" id="find-close" type="button" title="Закрыть (Esc)">✕</button>
+    </div>
+    <div class="find-row" id="find-replace-row" hidden>
+      <input id="replace-input" placeholder="Заменить на" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Заменить на">
+      <button class="code-tool" id="replace-one" type="button" title="Заменить это совпадение">Заменить</button>
+      <button class="code-tool" id="replace-all" type="button" title="Заменить все совпадения">Все</button>
+    </div>
+  </div>
   <div class="doc-body" id="doc-body">
     <!-- A highlighted copy of the text under a transparent textarea: native typing, selection and undo. -->
     <div class="code-gutter" id="code-gutter" aria-hidden="true" hidden></div>
     <pre class="code-hl" id="code-hl" aria-hidden="true" hidden></pre>
+    <!-- Same metrics again, transparent text: only the marks of search matches show. -->
+    <pre class="code-hl find-hl" id="find-hl" aria-hidden="true" hidden></pre>
     <textarea id="doc-text" spellcheck="true"></textarea>
   </div>
   <!-- Output of a run. Drag the top edge (desktop) or tap the header (phone) to resize. -->

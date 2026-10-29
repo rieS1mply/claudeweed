@@ -52,7 +52,7 @@ function renderTrash(list) {
             t.section === 'notes' ? icon('note') : null),
           el('div', { class: 'file-main' },
             el('div', { class: 'file-name', text: t.section === 'notes' ? 'Заметка' : t.name }),
-            el('div', { class: 'file-meta', text: `${SECTION_NAMES[t.section]} · ${fmtSize(t.size)} · ${daysLeft(t.days_left)}` })),
+            el('div', { class: 'file-meta', text: `${t.version ? `прошлая версия до ${fmtDate(t.deleted_at)}` : SECTION_NAMES[t.section]} · ${fmtSize(t.size)} · ${daysLeft(t.days_left)}` })),
           el('button', { class: 'btn round', title: 'Действия', onclick: (e) => { e.stopPropagation(); trashActions(t); } }, icon('more')));
       }))));
   }

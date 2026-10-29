@@ -28,6 +28,9 @@ pub struct Entry {
     pub deleted_at: i64,
     /// The file's own date (its mtime), put back on restore.
     pub date: i64,
+    /// An earlier version kept when a file was saved in the editor, not a deleted file.
+    #[serde(default)]
+    pub version: bool,
 }
 
 impl Entry {
@@ -53,6 +56,20 @@ fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Moves `file` (which lives at `rel` inside `section`) into the trash.
 pub fn move_in(trash: &Path, section: &str, rel: &str, file: &Path) -> Result<Entry> {
+    store(trash, section, rel, file, false)
+}
+
+/// Like [`move_in`], for the previous content of a file saved in the editor.
+pub fn keep_version(trash: &Path, section: &str, rel: &str, file: &Path) -> Result<Entry> {
+    store(trash, section, rel, file, true)
+}
+
+/// Earlier versions of the file at `rel`, newest first.
+pub fn versions(trash: &Path, section: &str, rel: &str) -> Vec<Entry> {
+    list(trash).into_iter().filter(|e| e.version && e.section == section && e.path == rel).collect()
+}
+
+fn store(trash: &Path, section: &str, rel: &str, file: &Path, version: bool) -> Result<Entry> {
     let meta = std::fs::metadata(file)?;
     let name = file.file_name().context("у файла нет имени")?.to_string_lossy().into_owned();
     let entry = Entry {
@@ -64,6 +81,7 @@ pub fn move_in(trash: &Path, section: &str, rel: &str, file: &Path) -> Result<En
         deleted_at: now_ms(),
         date: storage::mtime_ms(&meta),
         name,
+        version,
     };
     let dir = trash.join(&entry.id);
     std::fs::create_dir_all(&dir)?;

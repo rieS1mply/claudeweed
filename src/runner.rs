@@ -325,6 +325,9 @@ fn command(argv: &[String], dir: &Path) -> Command {
         .env("DOTNET_NOLOGO", "1")
         .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
         .kill_on_drop(true);
+    for var in crate::terminal_store::inherited_agent_vars() {
+        cmd.env_remove(var);
+    }
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     #[cfg(unix)]

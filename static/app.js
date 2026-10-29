@@ -366,9 +366,16 @@ const realApi = {
   fileUrl: (section, item, download) =>
     `/api/file?${qs({ section, path: item.path, v: `${item.date}-${item.size}`, ...(download ? { download: '1' } : {}) })}`,
   rename: (section, item, name) => request(`/api/file/rename?${qs({ section, path: item.path })}`, { method: 'POST', json: { name } }),
-  replace: (section, item, blob, keepOriginal) => request(
-    `/api/file/content?${qs({ section, path: item.path, ...(keepOriginal ? { keep_original: '1' } : {}) })}`,
+  // keep: true — the previous file goes to the trash; 'version' — into the file's history.
+  replace: (section, item, blob, keep) => request(
+    `/api/file/content?${qs({ section, path: item.path, ...(keep === 'version' ? { version: '1' } : keep ? { keep_original: '1' } : {}) })}`,
     { method: 'PUT', body: blob, headers: { 'Content-Type': 'application/octet-stream' } }),
+  versions: (section, item) => request(`/api/versions?${qs({ section, path: item.path })}`),
+  async versionText(id) {
+    const res = await fetch(`/api/trash/${id}/file`, { credentials: 'same-origin' });
+    if (!res.ok) throw new HttpError(res.status, `Ошибка ${res.status}`);
+    return res.text();
+  },
   copy: (section, item, name, blob) => request(`/api/file/copy?${qs({ section, path: item.path, name })}`,
     { method: 'POST', body: blob, headers: { 'Content-Type': 'application/octet-stream' } }),
   async readText(section, item) {
@@ -553,6 +560,7 @@ const mockApi = (() => {
       item.kind = kindOf(name);
       return { path: item.path };
     },
+    async versions() { return { items: [] }; },
     async replace(section, item, blob, keepOriginal) {
       if (keepOriginal) toTrash(section, { ...item });
       if (blob.type.startsWith('image/')) item.blob = URL.createObjectURL(blob);
@@ -796,6 +804,7 @@ function showSectionHeader() {
   $('#page-title').textContent = name;
   $('#nav-title').textContent = name;
   $('#head-action').hidden = true;
+  $('#summary').classList.remove('warn');
   $('#select-btn').hidden = !(state.section === 'photos' || state.section === 'files');
   // Each section starts unfiltered; render() shows the field once there is something to search.
   $('#search').value = '';
@@ -943,7 +952,7 @@ function render() {
   if (!list) return;
   if (section === 'notes') return renderNotes(list);
   if (section === 'trash') return renderTrash(list);
-  const { total_size } = list;
+  const { total_size, disk_free } = list;
   const all = list.items;
   const items = filterByQuery(all, (i) => i.name);
   const content = $('#content');
@@ -957,7 +966,10 @@ function render() {
   headAction = chooseSort;
   $('#summary').textContent = n
     ? `${n} ${section === 'photos' ? 'фото и видео' : plural(n, 'файл', 'файла', 'файлов')} · ${fmtSize(total_size)}`
+      + (disk_free != null ? ` · свободно ${fmtSize(disk_free)}` : '')
     : '';
+  // Uploads stop below 1 GB free (DISK_RESERVE on the server): warn well before that.
+  $('#summary').classList.toggle('warn', disk_free != null && disk_free < 10 * 1024 ** 3);
 
   if (!n) {
     content.replaceChildren(el('div', { class: 'empty' },

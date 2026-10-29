@@ -57,6 +57,13 @@ Copy-Item target\release\local-photo.exe "$env:LOCALAPPDATA\Programs\local-photo
 
 После перезапуска адрес trycloudflare меняется (придёт в Telegram).
 
+**Если Claude запущен в веб-терминале самого облака** (оболочка — дочерний процесс
+local-photo.exe), `--stop` убьёт и терминал, и самого Claude: облако останется выключенным
+(так случилось 2026-10-30). Тогда не выкатывать самому, а попросить владельца выкатить
+из обычного окна, или запустить выкатку отдельным процессом, который переживёт остановку:
+`Start-Process powershell -WindowStyle Hidden -ArgumentList '-File','deploy.ps1'` со всеми
+тремя шагами внутри.
+
 ## Устройство
 
 | Файл | Что внутри |
@@ -72,6 +79,7 @@ Copy-Item target\release\local-photo.exe "$env:LOCALAPPDATA\Programs\local-photo
 | `src/tunnel.rs` | скачивание и перезапуск cloudflared: быстрый туннель или именованный (`--tunnel named`), фильтр повторяющихся ошибок |
 | `src/telegram.rs`, `src/bot.rs` | Bot API и приём файлов из чата владельца |
 | `src/terminal.rs` | до 8 именованных PTY-сеансов (ConPTY на Windows), история, deflate-сжатие вывода; REST `/api/terminal/sessions` + WebSocket `/api/terminal?id=N` |
+| `src/terminal_store.rs` | сеансы переживают перезапуск: раз в 15 с пишутся в `<настройки>/terminal/` (имя, папка, вывод, запущенный Claude); при старте оболочки возвращаются, в них вводится `claude --resume <id>`. Папку PowerShell сообщает своим приглашением (OSC 7). Убирает переменные `CLAUDE_CODE_*` из окружения оболочек |
 | `src/runner.rs` | запуск кода (как онлайн-компилятор): таблица `LANGS`, поиск инструментов `which`, лимиты, NDJSON-поток `/api/run`, `/api/run/langs` |
 | `src/trash.rs`, `src/notes.rs`, `src/zips.rs`, `src/thumbs.rs` | корзина 30 дней, заметки, ZIP, превью |
 | `static/app.js` | ядро интерфейса, поиск, клавиши; `editor.js` (фото + редактор кода), `runner.js` (запуск кода, песочница, шаблоны `RUN_TEMPLATES`), `notes.js`, `trash.js`, `select.js`, `terminal.js` — разделы; `highlight.js` — сторонний, не править |

@@ -118,6 +118,7 @@ pub fn router(app: App) -> Router {
         .route("/api/file", get(get_file).delete(delete_file))
         .route("/api/file/rename", post(rename_file))
         .route("/api/file/content", put(replace_file).layer(DefaultBodyLimit::max(MAX_EDIT_BODY)))
+        .route("/api/versions", get(versions))
         .route("/api/file/copy", post(copy_file).layer(DefaultBodyLimit::max(MAX_EDIT_BODY)))
         .route("/api/thumb", get(thumb))
         .route("/api/zip", post(zip_start))
@@ -156,10 +157,45 @@ pub fn router(app: App) -> Router {
         .with_state(app)
 }
 
+/// Below this the owner gets a Telegram warning: uploads stop working at [`DISK_RESERVE`].
+const DISK_WARN: u64 = 10 * 1024 * 1024 * 1024;
+/// Repeat the warning at most this often while the disk stays full.
+const DISK_WARN_EVERY: Duration = Duration::from_secs(24 * 3600);
+
+fn gb(bytes: u64) -> f64 {
+    bytes as f64 / 1024f64.powi(3)
+}
+
+/// Checks free space on the storage disk; `last_warned` limits the warnings to one a day.
+async fn check_disk(app: &AppState, last_warned: &mut Option<Instant>) {
+    let Ok(free) = fs4::available_space(&app.paths.storage) else { return };
+    if free >= DISK_WARN {
+        *last_warned = None;
+        return;
+    }
+    if last_warned.is_some_and(|t| t.elapsed() < DISK_WARN_EVERY) {
+        return;
+    }
+    *last_warned = Some(Instant::now());
+    let text = format!(
+        "На диске с облаком осталось {:.1} ГБ. Когда останется меньше 1 ГБ, загрузка перестанет работать. Освободите место или очистите корзину.",
+        gb(free)
+    );
+    crate::log!("{text}");
+    if let Some(tg) = app.config.telegram.clone() {
+        telegram::send_with_retry(&tg, &text).await;
+    }
+}
+
 pub fn spawn_upload_janitor(app: App) {
     tokio::spawn(async move {
+        let mut disk_warned = None;
+        // A full disk is worth knowing about right after the start.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        check_disk(&app, &mut disk_warned).await;
         loop {
             tokio::time::sleep(Duration::from_secs(600)).await;
+            check_disk(&app, &mut disk_warned).await;
             let stale: Vec<Arc<Mutex<Upload>>> = {
                 let mut map = app.uploads.lock().unwrap();
                 let mut stale = Vec::new();
@@ -471,8 +507,26 @@ fn terminal_off(app: &App) -> bool {
     if app.terminal_enabled() {
         return false;
     }
-    app.terminal.shutdown();
+    app.terminal.disable();
     true
+}
+
+/// Brings back the terminal sessions saved before the last stop, then saves them every
+/// few seconds (a reboot or power cut doesn't wait for a clean stop).
+pub fn spawn_terminal_saver(app: App, dir: PathBuf) {
+    tokio::spawn(async move {
+        let (term, enabled) = (app.terminal.clone(), app.terminal_enabled());
+        let restore_dir = dir.clone();
+        let _ = tokio::task::spawn_blocking(move || term.restore(&restore_dir, enabled)).await;
+        loop {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            if !app.terminal_enabled() {
+                continue;
+            }
+            let term = app.terminal.clone();
+            let _ = tokio::task::spawn_blocking(move || term.save()).await;
+        }
+    });
 }
 
 async fn terminal_list(State(app): State<App>) -> Response {
@@ -639,7 +693,8 @@ async fn list(State(app): State<App>, Query(q): Query<ListQuery>) -> Response {
     let root = app.section_root(section);
     let items = tokio::task::spawn_blocking(move || storage::list(&root)).await.unwrap_or_default();
     let total: u64 = items.iter().map(|i| i.size).sum();
-    Json(json!({ "items": items, "total_size": total })).into_response()
+    let free = fs4::available_space(&app.paths.storage).ok();
+    Json(json!({ "items": items, "total_size": total, "disk_free": free })).into_response()
 }
 
 /// Streams a stored file. Range requests work (video seeking, Safari playback needs them).
@@ -756,6 +811,9 @@ struct ReplaceQuery {
     /// Put the previous version into the trash (photo edits) instead of overwriting it.
     #[serde(default)]
     keep_original: Option<String>,
+    /// Same, but as an editor version: listed in the file's history (`/api/versions`).
+    #[serde(default)]
+    version: Option<String>,
 }
 
 /// Overwrites a file's content in place, keeping its date so it stays where it is in the timeline.
@@ -768,11 +826,14 @@ async fn replace_file(State(app): State<App>, Query(q): Query<ReplaceQuery>, bod
 
     let (trash_dir, rel, target) = (app.paths.trash.clone(), q.path.clone(), path.clone());
     let keep = q.keep_original.is_some();
+    let version = q.version.is_some();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         let dir = target.parent().ok_or_else(|| anyhow::anyhow!("нет папки"))?;
         let tmp = dir.join(format!(".edit-{}.tmp", auth::random_hex(6)));
         std::fs::write(&tmp, &body)?;
-        if keep {
+        if version {
+            trash::keep_version(&trash_dir, section.id(), &rel, &target)?;
+        } else if keep {
             trash::move_in(&trash_dir, section.id(), &rel, &target)?;
         }
         std::fs::rename(&tmp, &target)?;
@@ -788,6 +849,17 @@ async fn replace_file(State(app): State<App>, Query(q): Query<ReplaceQuery>, bod
         Ok(Err(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Не удалось сохранить: {e:#}")),
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось сохранить"),
     }
+}
+
+/// Earlier versions of a file saved in the editor (they live in the trash for 30 days).
+async fn versions(State(app): State<App>, Query(q): Query<FileQuery>) -> Response {
+    if Section::parse(&q.section).is_none() {
+        return error(StatusCode::BAD_REQUEST, "Неизвестный раздел");
+    }
+    let (dir, section, path) = (app.paths.trash.clone(), q.section.clone(), q.path.clone());
+    let items = tokio::task::spawn_blocking(move || trash::versions(&dir, &section, &path)).await.unwrap_or_default();
+    let items: Vec<_> = items.into_iter().map(|e| json!({ "id": e.id, "size": e.size, "saved_at": e.deleted_at, "date": e.date })).collect();
+    Json(json!({ "items": items })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -960,7 +1032,7 @@ async fn trash_list(State(app): State<App>) -> Response {
         .map(|e| {
             let days_left = ((e.expires_at() - now).max(0) + 86_399_999) / 86_400_000;
             json!({ "id": e.id, "section": e.section, "path": e.path, "name": e.name, "size": e.size,
-                    "kind": e.kind, "deleted_at": e.deleted_at, "date": e.date, "days_left": days_left })
+                    "kind": e.kind, "deleted_at": e.deleted_at, "date": e.date, "days_left": days_left, "version": e.version })
         })
         .collect();
     Json(json!({ "items": items, "retention_days": trash::RETENTION_DAYS })).into_response()
@@ -1027,7 +1099,6 @@ async fn upload_init(State(app): State<App>, Json(body): Json<InitBody>) -> Resp
     // The size is known up front: refuse now rather than fail after hours of uploading.
     if let Ok(free) = fs4::available_space(&app.paths.uploads) {
         if body.size.saturating_add(DISK_RESERVE) > free {
-            let gb = |b: u64| b as f64 / 1024f64.powi(3);
             return error(
                 StatusCode::INSUFFICIENT_STORAGE,
                 &format!("Не хватает места на диске: свободно {:.1} ГБ, файл {:.1} ГБ", gb(free.saturating_sub(DISK_RESERVE)), gb(body.size)),

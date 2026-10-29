@@ -547,6 +547,7 @@ async function openDocView({ title, text, mono, lang = null, file = null, left, 
   area.value = text;
   area.scrollTop = area.scrollLeft = 0;
   Object.assign(doc, { onClose, onInput, slide, code: mono, lang, file, hljs: null, lines: 0 });
+  closeFind(false);
   setCodeMode(mono, text);
   runnerOnOpen();   // runner.js: the Run button and output panel for runnable files
   const from = slide === 'left' ? 'translateX(100%)' : 'translateY(100%)';
@@ -631,6 +632,7 @@ function renderCode() {
       pre.textContent = `${text}\n`;
     }
     if (!codePrefs.wrap) renderGutter(text);
+    if (finder.open) updateMatches();
     syncCodeScroll();
   });
 }
@@ -648,11 +650,190 @@ function renderGutter(text) {
 
 function syncCodeScroll() {
   const area = $('#doc-text');
-  $('#code-hl').style.transform = `translate(${-area.scrollLeft}px, ${-area.scrollTop}px)`;
+  for (const layer of [$('#code-hl'), $('#find-hl')]) {
+    layer.style.transform = `translate(${-area.scrollLeft}px, ${-area.scrollTop}px)`;
+    // Wrapped lines must break at the same width as the textarea's (its scrollbar included).
+    if (codePrefs.wrap) layer.style.width = `${area.clientWidth}px`;
+    else layer.style.removeProperty('width');
+  }
   $('#code-gutter').style.transform = `translateY(${-area.scrollTop}px)`;
-  // Wrapped lines must break at the same width as the textarea's (its scrollbar included).
-  if (codePrefs.wrap) $('#code-hl').style.width = `${area.clientWidth}px`;
-  else $('#code-hl').style.removeProperty('width');
+}
+
+// ---------- find & replace ----------
+
+const finder = { open: false, matches: [], cur: -1, caseSensitive: false, regex: false };
+const MAX_MATCHES = 10_000;
+
+/** The search as a global RegExp, or null (empty, or a broken regular expression). */
+function findPattern() {
+  const q = $('#find-input').value;
+  if (!q) return null;
+  const source = finder.regex ? q : q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  try {
+    return new RegExp(source, finder.caseSensitive ? 'g' : 'gi');
+  } catch {
+    return null;
+  }
+}
+
+/** Recomputes the matches; keeps the current one near where it was (or after the caret). */
+function updateMatches(from = null) {
+  const area = $('#doc-text'), text = area.value, re = findPattern();
+  const prev = finder.matches[finder.cur]?.[0];
+  finder.matches = [];
+  $('#find-input').classList.toggle('bad', Boolean($('#find-input').value) && !re);
+  if (re) {
+    for (let m = re.exec(text); m && finder.matches.length < MAX_MATCHES; m = re.exec(text)) {
+      if (!m[0].length) { re.lastIndex++; continue; }   // a regex like "a*" matches nothing everywhere
+      finder.matches.push([m.index, m.index + m[0].length, m]);
+    }
+  }
+  const anchor = from ?? prev ?? area.selectionStart;
+  const i = finder.matches.findIndex(([s]) => s >= anchor);
+  finder.cur = finder.matches.length ? (i === -1 ? 0 : i) : -1;
+  renderFindMarks();
+}
+
+function renderFindMarks() {
+  const layer = $('#find-hl'), text = $('#doc-text').value;
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  let html = '', pos = 0;
+  finder.matches.forEach(([s, e], i) => {
+    html += `${esc(text.slice(pos, s))}<mark${i === finder.cur ? ' class="cur"' : ''}>${esc(text.slice(s, e))}</mark>`;
+    pos = e;
+  });
+  layer.innerHTML = `${html}${esc(text.slice(pos))}\n`;
+  const n = finder.matches.length;
+  $('#find-count').textContent = !$('#find-input').value ? ''
+    : n ? `${finder.cur + 1} из ${n}${n >= MAX_MATCHES ? '+' : ''}` : 'нет';
+}
+
+/** Scrolls the textarea so the current match sits a third of the way down, and selects it. */
+function revealMatch() {
+  const m = finder.matches[finder.cur];
+  if (!m) return;
+  const area = $('#doc-text');
+  area.setSelectionRange(m[0], m[1]);
+  const mark = $('#find-hl mark.cur');
+  if (mark) {
+    area.scrollTop = Math.max(0, mark.offsetTop - area.clientHeight / 3);
+    const left = mark.offsetLeft, right = left + mark.offsetWidth;
+    if (left < area.scrollLeft + 40 || right > area.scrollLeft + area.clientWidth - 40) area.scrollLeft = Math.max(0, left - area.clientWidth / 3);
+  }
+  syncCodeScroll();
+  updateCursorPos();
+}
+
+function stepMatch(dir) {
+  const n = finder.matches.length;
+  if (!n) return;
+  finder.cur = (finder.cur + dir + n) % n;
+  renderFindMarks();
+  revealMatch();
+}
+
+function openFind(replace) {
+  if (!doc.code) return;
+  const area = $('#doc-text'), input = $('#find-input');
+  const selected = area.value.slice(area.selectionStart, area.selectionEnd);
+  if (selected && !selected.includes('\n')) input.value = selected;
+  finder.open = true;
+  $('#find-bar').hidden = $('#find-hl').hidden = false;
+  if (replace) $('#find-replace-row').hidden = false;
+  $('#find-toggle').classList.toggle('on', !$('#find-replace-row').hidden);
+  updateMatches(area.selectionStart);
+  syncCodeScroll();
+  input.focus();
+  input.select();
+}
+
+function closeFind(focusText = true) {
+  if (!finder.open) return;
+  finder.open = false;
+  finder.matches = [];
+  $('#find-bar').hidden = $('#find-hl').hidden = true;
+  $('#find-replace-row').hidden = true;
+  $('#find-hl').textContent = '';
+  if (focusText) $('#doc-text').focus();
+}
+
+/** The replacement for one match: with regex on, $1 and $<name> refer to its groups. */
+function replacementFor(m) {
+  const with_ = $('#replace-input').value;
+  if (!finder.regex) return with_;
+  const groups = m[2];
+  return with_.replace(/\$(\$|&|\d{1,2}|<([^>]*)>)/g, (all, ref, name) => {
+    if (ref === '$') return '$';
+    if (ref === '&') return groups[0];
+    if (name !== undefined) return groups.groups?.[name] ?? '';
+    return Number(ref) < groups.length ? (groups[Number(ref)] ?? '') : all;
+  });
+}
+
+function replaceOne() {
+  const m = finder.matches[finder.cur];
+  if (!m) return;
+  const area = $('#doc-text');
+  area.focus();
+  area.setSelectionRange(m[0], m[1]);
+  const text = replacementFor(m);
+  insertText(area, text);   // fires input → onInput, re-render
+  updateMatches(m[0] + text.length);
+  revealMatch();
+  $('#replace-input').focus();
+}
+
+function replaceAll() {
+  if (!finder.matches.length) return;
+  const area = $('#doc-text'), v = area.value;
+  let out = '', pos = 0;
+  for (const m of finder.matches) {
+    out += v.slice(pos, m[0]) + replacementFor(m);
+    pos = m[1];
+  }
+  out += v.slice(pos);
+  const n = finder.matches.length;
+  // One edit for the whole text: a single Ctrl+Z undoes all the replacements.
+  area.focus();
+  area.setSelectionRange(0, v.length);
+  insertText(area, out);
+  area.setSelectionRange(0, 0);
+  updateMatches(0);
+  toast(`Заменено: ${n}`);
+  $('#replace-input').focus();
+}
+
+function bindFind() {
+  const input = $('#find-input');
+  input.addEventListener('input', () => { updateMatches($('#doc-text').selectionStart); revealMatch(); });
+  const keys = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeFind(); }
+    else if (e.key === 'Enter' && e.target === input) { e.preventDefault(); stepMatch(e.shiftKey ? -1 : 1); }
+    else if (e.key === 'Enter') { e.preventDefault(); if (e.ctrlKey || e.metaKey) replaceAll(); else replaceOne(); }
+    else if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'h')) { e.preventDefault(); openFind(e.key === 'h'); }
+  };
+  input.addEventListener('keydown', keys);
+  $('#replace-input').addEventListener('keydown', keys);
+  $('#find-next').addEventListener('click', () => stepMatch(1));
+  $('#find-prev').addEventListener('click', () => stepMatch(-1));
+  $('#find-close').addEventListener('click', () => closeFind());
+  $('#code-find').addEventListener('click', () => (finder.open ? closeFind() : openFind(false)));
+  $('#find-toggle').addEventListener('click', () => {
+    const row = $('#find-replace-row');
+    row.hidden = !row.hidden;
+    $('#find-toggle').classList.toggle('on', !row.hidden);
+    (row.hidden ? input : $('#replace-input')).focus();
+  });
+  for (const [id, key] of [['#find-case', 'caseSensitive'], ['#find-regex', 'regex']]) {
+    $(id).addEventListener('click', () => {
+      finder[key] = !finder[key];
+      $(id).classList.toggle('on', finder[key]);
+      updateMatches();
+      revealMatch();
+    });
+  }
+  $('#replace-one').addEventListener('click', replaceOne);
+  $('#replace-all').addEventListener('click', replaceAll);
 }
 
 function updateCursorPos() {
@@ -745,8 +926,10 @@ function bindDocView() {
       e.preventDefault();
       $('#doc-right').querySelector('[data-save]')?.click();
     }
-    if (e.key === 'Escape') { e.preventDefault(); doc.onClose?.(); }
+    if (e.key === 'Escape') { e.preventDefault(); if (finder.open) closeFind(); else doc.onClose?.(); }
     if (!doc.code || e.isComposing) return;
+    if (mod && (e.key === 'f' || e.key === 'h')) { e.preventDefault(); openFind(e.key === 'h'); return; }
+    if (e.key === 'F3' && finder.open) { e.preventDefault(); stepMatch(e.shiftKey ? -1 : 1); return; }
     if (e.key === 'Tab' && !mod && !e.altKey) { e.preventDefault(); indentSelection(area, e.shiftKey); }
     else if (e.key === 'Enter' && !mod && !e.shiftKey && !e.altKey) { e.preventDefault(); newlineWithIndent(area); }
     else if (mod && e.key === 'g') { e.preventDefault(); goToLine(); }
@@ -763,9 +946,44 @@ function bindDocView() {
   $('#code-bigger').addEventListener('click', () => setCodeSize(1));
   $('#code-smaller').addEventListener('click', () => setCodeSize(-1));
   $('#code-goto').addEventListener('click', goToLine);
+  bindFind();
   // A phone keyboard has no Tab key.
   $('#code-tab').addEventListener('pointerdown', (e) => e.preventDefault());   // keep the keyboard open
   $('#code-tab').addEventListener('click', () => { area.focus(); indentSelection(area, false); });
+}
+
+/** Earlier saves of the open file: load one into the editor (undo works) or download it. */
+async function showVersions(section, item) {
+  let items;
+  try {
+    ({ items } = await api.versions(section, item));
+  } catch (e) {
+    return toast(e.message);
+  }
+  if (!items.length) return toast('Прошлых версий нет: они появляются после сохранения');
+  const pick = (v) => actionSheet(`Версия до ${fmtDate(v.saved_at)}`, [
+    {
+      label: 'Открыть в редакторе', hint: 'текст заменится, сохранить — кнопкой «Сохранить»',
+      run: async () => {
+        try {
+          const text = await api.versionText(v.id);
+          const area = $('#doc-text');
+          area.focus();
+          area.setSelectionRange(0, area.value.length);
+          insertText(area, text);   // one undo step back to the current text
+          area.setSelectionRange(0, 0);
+          area.scrollTop = 0;
+          toast('Версия загружена — Ctrl+Z вернёт текущий текст');
+        } catch (e) {
+          toast(e.message);
+        }
+      },
+    },
+    { label: 'Скачать', run: () => triggerDownload(`/api/trash/${v.id}/file`, item.name) },
+  ]);
+  actionSheet(`История: ${item.name}`, items.map((v) => ({
+    label: `До ${fmtDate(v.saved_at)}`, hint: fmtSize(v.size), run: () => pick(v),
+  })));
 }
 
 async function openTextEditor(section, item) {
@@ -781,7 +999,8 @@ async function openTextEditor(section, item) {
   save.onclick = async () => {
     save.disabled = true;
     try {
-      await api.replace(section, item, new Blob([current], { type: 'text/plain' }), false);
+      // The text before this save stays in the file's history for 30 days.
+      await api.replace(section, item, new Blob([current], { type: 'text/plain' }), 'version');
       original = current;
       $('#doc-status').textContent = 'Сохранено';
       load(section);
@@ -790,9 +1009,10 @@ async function openTextEditor(section, item) {
       toast(e.message);
     }
   };
+  const history = el('button', { class: 'doc-btn', text: 'История', title: 'Прошлые версии файла', onclick: () => showVersions(section, item) });
   await openDocView({
     title: item.name, text: original, mono: true, lang: CODE_LANG[splitName(item.name)[1]] || null, file: item.name,
-    left: 'Закрыть', right: [save], slide: 'up',
+    left: 'Закрыть', right: [history, save], slide: 'up',
     onInput: (v) => {
       current = v;
       save.disabled = v === original;

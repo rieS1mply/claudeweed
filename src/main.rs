@@ -15,6 +15,7 @@ mod service;
 mod storage;
 mod telegram;
 mod terminal;
+mod terminal_store;
 mod thumbs;
 mod trash;
 mod totp;
@@ -483,6 +484,7 @@ async fn run() -> Result<()> {
     let secret = status.lock().unwrap().secret.clone();
     let app = web::AppState::new(paths.clone(), config.clone(), auth, secret, stop.clone());
     web::spawn_upload_janitor(app.clone());
+    web::spawn_terminal_saver(app.clone(), config_dir.join("terminal"));
     let public_url: bot::PublicUrl = Default::default();
     // The bot runs whenever Telegram is set up, also without a tunnel.
     let bot = config.telegram.clone().map(|tg| {
@@ -559,6 +561,9 @@ async fn run() -> Result<()> {
         _ = deadline => log!("Не все соединения закрылись, завершаю принудительно"),
     }
 
+    // Saved first: the shells come back on the next start.
+    let saving = terminal.clone();
+    let _ = tokio::task::spawn_blocking(move || saving.save()).await;
     terminal.shutdown();
     // Dropping the task kills cloudflared (kill_on_drop).
     for t in tunnel.into_iter().chain(bot).chain(Some(backups)) {
