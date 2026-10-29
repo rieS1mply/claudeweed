@@ -27,6 +27,8 @@
 
 ## Сборка
 
+Пошаговая установка для агента Claude (или человека) на macOS, Linux и Windows — [INSTALL.md](INSTALL.md).
+
 Нужен Rust (https://rustup.rs).
 
 ```sh
