@@ -656,6 +656,71 @@ a.btn { color: inherit; text-decoration: none; }
   .doc.code #doc-text, .doc.code .code-hl { padding-right: 10px; }
 }
 
+/* ---------- code runner ---------- */
+.code-run {
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+  height: 30px; padding: 0 14px 0 11px; margin-right: 8px; border: 0; border-radius: 999px; cursor: pointer;
+  background: var(--ok); color: #000; font: 600 13px var(--font);
+  transition: transform .4s var(--ease-bouncy), background .2s;
+}
+.code-run .icon { width: 14px; height: 14px; fill: currentColor; stroke: none; }
+.code-run:active { transform: scale(.92); transition-duration: .1s; }
+.code-run.stop { background: var(--danger); color: #fff; }
+@media (pointer: coarse) { .code-run { height: 36px; padding: 0 16px 0 13px; font-size: 14px; } }
+
+.run-panel {
+  flex: 0 0 var(--run-h, 40%); min-height: 0; position: relative;
+  display: flex; flex-direction: column;
+  background: #0b0b0d; border-top: .5px solid rgba(255, 255, 255, .14);
+}
+.doc.run-full .doc-body, .doc.run-full .code-bar { display: none; }
+.doc.run-full .run-panel { flex: 1; }
+.doc.resizing { user-select: none; cursor: ns-resize; }
+.run-grip { position: absolute; top: -6px; left: 0; right: 0; height: 12px; cursor: ns-resize; z-index: 3; touch-action: none; }
+.run-grip::after {
+  content: ""; position: absolute; left: 50%; top: 4px; width: 36px; height: 4px; margin-left: -18px;
+  border-radius: 2px; background: rgba(255, 255, 255, .22);
+}
+@media (pointer: coarse) { .run-grip { display: none; } }
+.run-head {
+  display: flex; align-items: center; gap: 4px; min-height: 38px; flex-shrink: 0;
+  padding: 0 max(8px, env(safe-area-inset-right)) 0 max(14px, env(safe-area-inset-left));
+  border-bottom: .5px solid rgba(255, 255, 255, .07);
+}
+.run-status { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; min-width: 0; }
+.run-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-right: 6px; background: var(--subtle); }
+.run-dot[data-state="busy"] { background: var(--accent); animation: run-pulse 1s ease-in-out infinite; }
+.run-dot[data-state="ok"] { background: var(--ok); }
+.run-dot[data-state="error"] { background: var(--danger); }
+@keyframes run-pulse { 50% { opacity: .3; } }
+.run-stdin {
+  flex: 0 0 auto; height: 72px; resize: vertical; min-height: 40px; max-height: 40%;
+  margin: 8px 10px 0; padding: 8px 10px; border-radius: 8px; outline: none;
+  border: .5px solid rgba(255, 255, 255, .16); background: rgba(255, 255, 255, .05); color: var(--text);
+  font: 13px/1.5 var(--mono);
+}
+@media (pointer: coarse) { .run-stdin { font-size: 16px; } }   /* no iOS zoom on focus */
+.run-out {
+  flex: 1; min-height: 0; margin: 0; overflow: auto; overscroll-behavior: contain;
+  padding: 10px max(14px, env(safe-area-inset-left)) max(16px, env(safe-area-inset-bottom));
+  font: 13px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text);
+  user-select: text; -webkit-user-select: text;
+}
+.run-err { color: #ff7a70; }
+.run-info { color: var(--subtle); }
+
+.sym-bar {
+  flex-shrink: 0; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none;
+  padding: 6px 8px max(6px, env(safe-area-inset-bottom)); background: #1c1c1f;
+  border-top: .5px solid rgba(255, 255, 255, .1);
+}
+.sym-bar::-webkit-scrollbar { display: none; }
+.sym {
+  flex-shrink: 0; min-width: 38px; height: 38px; padding: 0 8px; border: 0; border-radius: 8px;
+  background: rgba(255, 255, 255, .1); color: var(--text); font: 500 17px var(--mono); cursor: pointer;
+}
+.sym:active { background: rgba(255, 255, 255, .25); }
+
 /* Code highlighting (highlight.js classes), dark. Colours only: bold or italic glyphs could shift the caret. */
 .code-hl .hljs-keyword, .code-hl .hljs-selector-tag, .code-hl .hljs-literal, .code-hl .hljs-meta .hljs-keyword { color: #fc5fa3; }
 .code-hl .hljs-string, .code-hl .hljs-meta .hljs-string, .code-hl .hljs-regexp, .code-hl .hljs-char { color: #fc6a5d; }

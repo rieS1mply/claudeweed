@@ -24,7 +24,7 @@ use tower_http::services::ServeFile;
 use crate::auth::{self, Auth};
 use crate::config::{Config, Paths};
 use crate::storage::{self, Kind, Section};
-use crate::{notes, telegram, terminal, thumbs, totp, trash, zips};
+use crate::{notes, runner, telegram, terminal, thumbs, totp, trash, zips};
 
 /// Matches CHUNK_SIZE in app.js, with headroom.
 const MAX_CHUNK: usize = 20 * 1024 * 1024;
@@ -49,6 +49,7 @@ pub struct AppState {
     place_lock: Mutex<()>,
     zips: zips::Jobs,
     pub terminal: Arc<terminal::Terminal>,
+    pub runner: Arc<runner::Runner>,
     /// Last authenticator step accepted at login: the same code can't log in twice.
     totp_last_step: std::sync::Mutex<u64>,
 }
@@ -78,6 +79,7 @@ impl AppState {
             place_lock: Mutex::new(()),
             zips: Default::default(),
             terminal: Default::default(),
+            runner: Default::default(),
             totp_last_step: Default::default(),
         })
     }
@@ -89,6 +91,10 @@ impl AppState {
     /// Read from config.json on every use, so `--terminal off` works without a restart.
     fn terminal_enabled(&self) -> bool {
         Config::load(&self.paths.config).ok().flatten().map_or(self.config.terminal, |c| c.terminal)
+    }
+
+    fn runner_enabled(&self) -> bool {
+        Config::load(&self.paths.config).ok().flatten().map_or(self.config.runner, |c| c.runner)
     }
 
     /// Also read live: `--2fa on` takes effect for the next login without a restart.
@@ -133,6 +139,8 @@ pub fn router(app: App) -> Router {
         .route("/api/terminal", get(terminal_ws))
         .route("/api/terminal/sessions", get(terminal_list).post(terminal_create))
         .route("/api/terminal/sessions/{id}", put(terminal_rename).delete(terminal_close))
+        .route("/api/run/langs", get(run_langs))
+        .route("/api/run", post(run_code).layer(DefaultBodyLimit::max(runner::MAX_SOURCE + runner::MAX_STDIN + 4096)))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_session));
 
     Router::new()
@@ -360,7 +368,7 @@ fn asset_response(name: &str, headers: &HeaderMap) -> Response {
 
 async fn session(State(app): State<App>, headers: HeaderMap) -> Response {
     let authenticated = app.auth.is_valid(&headers);
-    Json(json!({ "authenticated": authenticated, "terminal": authenticated && app.terminal_enabled() })).into_response()
+    Json(json!({ "authenticated": authenticated, "terminal": authenticated && app.terminal_enabled(), "runner": authenticated && app.runner_enabled() })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -515,6 +523,69 @@ async fn terminal_close(State(app): State<App>, headers: HeaderMap, UrlPath(id):
     }
     crate::log!("Терминал: сеанс {id} закрыт (адрес: {})", auth::client_ip(&headers));
     Json(json!({ "ok": true })).into_response()
+}
+
+// ---------- code runner ----------
+
+#[derive(Deserialize)]
+struct LangsQuery {
+    #[serde(default)]
+    refresh: Option<String>,
+}
+
+async fn run_langs(State(app): State<App>, Query(q): Query<LangsQuery>) -> Response {
+    if !app.runner_enabled() {
+        return not_found();
+    }
+    Json(json!({ "langs": app.runner.languages(q.refresh.is_some()).await })).into_response()
+}
+
+#[derive(Deserialize)]
+struct RunBody {
+    lang: String,
+    code: String,
+    #[serde(default)]
+    stdin: String,
+}
+
+/// Streams the run as NDJSON (one `runner::Event` per line). Closing the request stops it.
+async fn run_code(State(app): State<App>, headers: HeaderMap, Json(body): Json<RunBody>) -> Response {
+    if !app.runner_enabled() {
+        return not_found();
+    }
+    if body.code.len() > runner::MAX_SOURCE || body.stdin.len() > runner::MAX_STDIN {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "Слишком большой файл для запуска");
+    }
+    let ip = auth::client_ip(&headers);
+    crate::log!("Запуск кода: {} (адрес: {ip})", body.lang);
+    // Same warning as for the terminal: this runs anything on this computer.
+    if let Some(tg) = app.config.telegram.clone().filter(|_| app.terminal.should_notify(&ip)) {
+        let text = format!("Через облако запускают код на компьютере (адрес: {ip}). Если это не вы — смените пароль: local-photo --setup");
+        tokio::spawn(async move { telegram::send_with_retry(&tg, &text).await });
+    }
+    let (tx, rx) = tokio::sync::mpsc::channel::<runner::Event>(64);
+    let worker = app.clone();
+    tokio::spawn(async move {
+        let Some(_slot) = worker.runner.try_slot() else {
+            let _ = tx.send(runner::Event::Err { v: "Уже идут два запуска — дождитесь их окончания или остановите\n".into() }).await;
+            let _ = tx.send(runner::Event::Exit { code: None, ms: 0, reason: Some("error") }).await;
+            return;
+        };
+        worker.runner.run(&body.lang, &body.code, &body.stdin, tx).await;
+    });
+    let lines = futures_util::stream::unfold(rx, |mut rx| async move {
+        let event = rx.recv().await?;
+        let mut line = serde_json::to_vec(&event).unwrap_or_default();
+        line.push(b'\n');
+        Some((Ok::<_, std::convert::Infallible>(Bytes::from(line)), rx))
+    });
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8")
+        // Proxies (the tunnel) must pass lines through as they come, not collect the whole answer.
+        .header(header::CACHE_CONTROL, "no-cache, no-transform")
+        .header("x-accel-buffering", "no")
+        .body(Body::from_stream(lines))
+        .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка"))
 }
 
 async fn terminal_ws(State(app): State<App>, headers: HeaderMap, Query(q): Query<TerminalQuery>, ws: WebSocketUpgrade) -> Response {

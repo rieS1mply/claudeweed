@@ -44,6 +44,9 @@
       <button class="btn glass round hide-sm" id="upload-btn" type="button" title="Загрузить">
         <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
       </button>
+      <button class="btn glass round" id="code-btn" type="button" title="Новый код — написать и запустить" hidden>
+        <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="m8 7-5 5 5 5M16 7l5 5-5 5M13.5 5l-3 14"/></svg>
+      </button>
       <a class="btn glass round" id="term-btn" href="terminal.html" title="Терминал" hidden>
         <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3M13 15h4"/></svg>
       </a>
@@ -248,6 +251,9 @@
   </div>
   <!-- Code files only: language, cursor position, wrapping, font size, go to line. -->
   <div class="code-bar" id="code-bar" hidden>
+    <button class="code-run" id="code-run" type="button" title="Запустить (Ctrl+Enter)" hidden>
+      <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M7 4v16l13-8z"/></svg><span>Запустить</span>
+    </button>
     <span class="code-lang" id="code-lang"></span>
     <span class="code-pos" id="code-pos"></span>
     <span class="ed-spacer"></span>
@@ -263,6 +269,23 @@
     <pre class="code-hl" id="code-hl" aria-hidden="true" hidden></pre>
     <textarea id="doc-text" spellcheck="true"></textarea>
   </div>
+  <!-- Output of a run. Drag the top edge (desktop) or tap the header (phone) to resize. -->
+  <section class="run-panel" id="run-panel" hidden>
+    <div class="run-grip" id="run-grip" aria-hidden="true"></div>
+    <div class="run-head" id="run-head">
+      <span class="run-dot" id="run-dot" data-state="idle"></span>
+      <span class="run-status" id="run-status"></span>
+      <span class="ed-spacer"></span>
+      <button class="code-tool" id="run-stdin-btn" type="button" title="Что программа прочитает из стандартного ввода">Ввод</button>
+      <button class="code-tool" id="run-clear" type="button" title="Очистить вывод">Очистить</button>
+      <button class="code-tool" id="run-expand" type="button" title="Развернуть">⤢</button>
+      <button class="code-tool" id="run-close" type="button" title="Скрыть вывод">✕</button>
+    </div>
+    <textarea class="run-stdin" id="run-stdin" placeholder="Ввод для программы (stdin): каждая строка — одна строка ввода" spellcheck="false" autocapitalize="off" autocorrect="off" hidden></textarea>
+    <pre class="run-out" id="run-out"></pre>
+  </section>
+  <!-- Phone: symbols a phone keyboard hides two screens deep. -->
+  <div class="sym-bar" id="sym-bar" hidden></div>
 </div>
 
 <div id="drop" class="drop" hidden><div class="drop-card glass">Отпустите, чтобы загрузить</div></div>
@@ -270,6 +293,7 @@
 
 <script src="app.js"></script>
 <script src="editor.js"></script>
+<script src="runner.js"></script>
 <script src="notes.js"></script>
 <script src="trash.js"></script>
 <script src="select.js"></script>

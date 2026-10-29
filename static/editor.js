@@ -538,7 +538,7 @@ function saveCodePrefs() {
 /** Full-screen document view, shared by the text editor and notes. */
 const doc = { onClose: null, onInput: null, slide: 'up', code: false, lang: null, hljs: null, indent: '    ', lines: 0, frame: 0 };
 
-async function openDocView({ title, text, mono, lang = null, left, right, status = '', slide = 'up', onInput, onClose }) {
+async function openDocView({ title, text, mono, lang = null, file = null, left, right, status = '', slide = 'up', onInput, onClose }) {
   const view = $('#doc'), area = $('#doc-text');
   $('#doc-title').textContent = title;
   $('#doc-left').textContent = left;
@@ -546,14 +546,16 @@ async function openDocView({ title, text, mono, lang = null, left, right, status
   $('#doc-right').replaceChildren(...right);
   area.value = text;
   area.scrollTop = area.scrollLeft = 0;
-  Object.assign(doc, { onClose, onInput, slide, code: mono, lang, hljs: null, lines: 0 });
+  Object.assign(doc, { onClose, onInput, slide, code: mono, lang, file, hljs: null, lines: 0 });
   setCodeMode(mono, text);
+  runnerOnOpen();   // runner.js: the Run button and output panel for runnable files
   const from = slide === 'left' ? 'translateX(100%)' : 'translateY(100%)';
   await enter(view, [{ transform: from }, { transform: 'none' }], 'smooth');
 }
 
 async function closeDocView() {
   const to = doc.slide === 'left' ? 'translateX(100%)' : 'translateY(100%)';
+  runnerOnClose();
   await leave($('#doc'), [{ transform: 'none' }, { transform: to }], 'smooth', { duration: 380 });
   lockZoom(false);
 }
@@ -789,7 +791,7 @@ async function openTextEditor(section, item) {
     }
   };
   await openDocView({
-    title: item.name, text: original, mono: true, lang: CODE_LANG[splitName(item.name)[1]] || null,
+    title: item.name, text: original, mono: true, lang: CODE_LANG[splitName(item.name)[1]] || null, file: item.name,
     left: 'Закрыть', right: [save], slide: 'up',
     onInput: (v) => {
       current = v;

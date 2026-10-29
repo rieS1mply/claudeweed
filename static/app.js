@@ -691,9 +691,15 @@ function showApp() {
   animate($('#content'), [{ transform: 'translateY(16px)' }, { transform: 'none' }], 'smooth', { fill: 'none' });
   onScroll();
   load(state.section);
-  // The terminal is off unless the computer's owner turned it on (local-photo --terminal on).
+  // The terminal and the code runner are off unless the computer's owner turned them on.
   $('#term-btn').hidden = true;
-  if (!MOCK) api.session().then((s) => { $('#term-btn').hidden = !s?.terminal; }).catch(() => {});
+  $('#code-btn').hidden = true;
+  if (!MOCK) {
+    api.session().then((s) => {
+      $('#term-btn').hidden = !s?.terminal;
+      setRunnerEnabled(Boolean(s?.runner));   // runner.js
+    }).catch(() => {});
+  }
 }
 
 async function onLogin(e) {

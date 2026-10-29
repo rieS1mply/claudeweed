@@ -10,6 +10,7 @@ mod bot;
 mod config;
 mod logging;
 mod notes;
+mod runner;
 mod service;
 mod storage;
 mod telegram;
@@ -49,6 +50,7 @@ struct Args {
     stop: bool,
     autostart: Option<bool>,
     terminal: Option<bool>,
+    runner: Option<bool>,
     two_factor: Option<bool>,
     /// `Some(None)` = `--backup off`.
     backup: Option<Option<PathBuf>>,
@@ -75,6 +77,7 @@ local-photo — домашнее облако для фото и файлов
   --stop              остановить облако, работающее в фоне
   --autostart on|off  запускать облако само при входе в систему (в фоне) / не запускать
   --terminal on|off   разрешить / запретить терминал этого компьютера на сайте
+  --runner on|off     разрешить / запретить запуск кода на сайте (как онлайн-компилятор)
   --2fa on|off        вход с кодом из приложения (Google Authenticator и др.) / без кода
   --backup <папка>    каждый день копировать хранилище в эту папку (лучше другой диск)
   --backup off        не делать резервную копию
@@ -91,7 +94,7 @@ local-photo — домашнее облако для фото и файлов
 fn parse_args() -> Result<Args> {
     let mut args = Args {
         dir: None, setup: false, no_tunnel: false, port: None, background: false, status: false, stop: false,
-        autostart: None, terminal: None, two_factor: None, backup: None, backup_now: false, named_tunnel: None,
+        autostart: None, terminal: None, runner: None, two_factor: None, backup: None, backup_now: false, named_tunnel: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -105,6 +108,7 @@ fn parse_args() -> Result<Args> {
             "--stop" => args.stop = true,
             "--autostart" => args.autostart = Some(on_off(it.next(), "--autostart")?),
             "--terminal" => args.terminal = Some(on_off(it.next(), "--terminal")?),
+            "--runner" => args.runner = Some(on_off(it.next(), "--runner")?),
             "--2fa" => args.two_factor = Some(on_off(it.next(), "--2fa")?),
             "--backup" => {
                 let v = it.next().context("после --backup нужна папка или off")?;
@@ -178,6 +182,8 @@ async fn print_status(config_dir: &Path) -> Result<()> {
     let config = Config::load(&config_dir.join(config::CONFIG_FILE)).ok().flatten();
     let terminal = config.as_ref().is_some_and(|c| c.terminal);
     println!("  Терминал:    {}", if terminal { "включён (--terminal off — выключить)" } else { "выключен" });
+    let runner = config.as_ref().is_some_and(|c| c.runner);
+    println!("  Запуск кода: {}", if runner { "включён (--runner off — выключить)" } else { "выключен (--runner on — включить)" });
     let two_factor = config.as_ref().is_some_and(|c| c.totp_secret.is_some());
     println!("  Вход:        {}", if two_factor { "пароль + код из приложения" } else { "только пароль (--2fa on — добавить код)" });
     let address = match config.as_ref().and_then(|c| c.named_tunnel.as_ref()) {
@@ -324,6 +330,20 @@ async fn run() -> Result<()> {
             println!("Кто знает пароль — может выполнять любые команды на этом компьютере.");
         } else {
             println!("Терминал выключен. Открытые сеансы закроются в течение 30 секунд.");
+        }
+        return Ok(());
+    }
+    if let Some(on) = args.runner {
+        let mut config = Config::load(&config_file)?.context("сначала настройте облако: запустите программу без параметров")?;
+        config.runner = on;
+        config.save(&config_file)?;
+        // Read live by the running cloud, like the terminal setting.
+        if on {
+            println!("Запуск кода включён: в редакторе файлов появится «▶ Запустить», в «Файлах» — «Новый код».");
+            println!("Программы работают на этом компьютере с правами этого пользователя: кто знает пароль —");
+            println!("может выполнить любой код. Включите вход с кодом из приложения: local-photo --2fa on");
+        } else {
+            println!("Запуск кода выключен.");
         }
         return Ok(());
     }

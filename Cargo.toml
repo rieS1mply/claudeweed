@@ -11,6 +11,7 @@ axum = { version = "0.8", features = ["ws"] }
 chrono = "0.4"
 filetime = "0.2"
 flate2 = "1"
+futures-util = { version = "0.3", default-features = false }
 fs4 = { version = "1", default-features = false, features = ["sync"] }
 getrandom = "0.2"
 hmac = "0.12"

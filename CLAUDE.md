@@ -72,8 +72,9 @@ Copy-Item target\release\local-photo.exe "$env:LOCALAPPDATA\Programs\local-photo
 | `src/tunnel.rs` | скачивание и перезапуск cloudflared: быстрый туннель или именованный (`--tunnel named`), фильтр повторяющихся ошибок |
 | `src/telegram.rs`, `src/bot.rs` | Bot API и приём файлов из чата владельца |
 | `src/terminal.rs` | до 8 именованных PTY-сеансов (ConPTY на Windows), история, deflate-сжатие вывода; REST `/api/terminal/sessions` + WebSocket `/api/terminal?id=N` |
+| `src/runner.rs` | запуск кода (как онлайн-компилятор): таблица `LANGS`, поиск инструментов `which`, лимиты, NDJSON-поток `/api/run`, `/api/run/langs` |
 | `src/trash.rs`, `src/notes.rs`, `src/zips.rs`, `src/thumbs.rs` | корзина 30 дней, заметки, ZIP, превью |
-| `static/app.js` | ядро интерфейса, поиск, клавиши; `editor.js` (фото + редактор кода), `notes.js`, `trash.js`, `select.js`, `terminal.js` — разделы; `highlight.js` — сторонний, не править |
+| `static/app.js` | ядро интерфейса, поиск, клавиши; `editor.js` (фото + редактор кода), `runner.js` (запуск кода, песочница, шаблоны `RUN_TEMPLATES`), `notes.js`, `trash.js`, `select.js`, `terminal.js` — разделы; `highlight.js` — сторонний, не править |
 | `static/start.js` | подключается последним и запускает приложение |
 
 Новый API-маршрут: обработчик в `web.rs`, регистрация в `router()` внутри `protected`
@@ -88,7 +89,13 @@ Copy-Item target\release\local-photo.exe "$env:LOCALAPPDATA\Programs\local-photo
 - Удаление = перенос в корзину, не `remove_file`.
 - Тяжёлая работа с диском/картинками — в `spawn_blocking`; размещение файлов под `place_lock`.
 - CSP запрещает inline-скрипты и стили (кроме страницы терминала): никаких `onclick=""` и `<style>` в HTML.
-- Терминал включает только владелец на самом компьютере (`--terminal on`), не код и не агент.
+- Терминал и запуск кода включает только владелец на самом компьютере (`--terminal on`,
+  `--runner on`), не код и не агент.
+- Новый язык для запуска: строка в `LANGS` (`src/runner.rs`), расширение в `RUN_LANG`,
+  подсветка в `RUN_HL` и шаблон в `RUN_TEMPLATES` (`static/runner.js`). Шаблон должен
+  печатать «Привет из облака!», «Ввод: …» и «2 + 3 = 5» — так его проверяет тест-скрипт.
+- Команды в Bash-инструменте Claude: `$` и `\` внутри perl/sed портятся — правки с ними
+  делать через Edit, не через однострочники.
 
 ## Стиль
 
