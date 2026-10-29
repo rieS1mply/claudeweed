@@ -93,7 +93,7 @@ pub fn list(trash: &Path) -> Vec<Entry> {
         .flatten()
         .filter_map(|e| get(trash, &e.file_name().to_string_lossy()).map(|(entry, _)| entry))
         .collect();
-    items.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at));
+    items.sort_by_key(|e| std::cmp::Reverse(e.deleted_at));
     items
 }
 

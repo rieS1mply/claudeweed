@@ -447,6 +447,16 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(windows)]
+    fn folder_input_forms_windows() {
+        let home = PathBuf::from(std::env::var_os("USERPROFILE").unwrap());
+        assert_eq!(parse_folder("~/Облако"), home.join("Облако"));
+        assert_eq!(parse_folder(r#"  "D:\Мой диск\Фото"  "#), PathBuf::from(r"D:\Мой диск\Фото"));
+        assert!(parse_folder("relative").is_absolute());
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn folder_input_forms() {
         let home = PathBuf::from(std::env::var_os("HOME").unwrap());
         assert_eq!(parse_folder("~/Облако"), home.join("Облако"));

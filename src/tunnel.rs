@@ -146,6 +146,7 @@ async fn run_once<F: Fn(String)>(bin: &Path, port: u16, on_url: &F) -> Result<()
     // early fails, and phones then cache "domain not found" for minutes.
     let mut pending: Option<String> = None;
     let mut announced = false;
+    let mut repeats = RepeatFilter::default();
     while let Some(line) = lines.next_line().await? {
         if !announced {
             if pending.is_none() {
@@ -163,11 +164,47 @@ async fn run_once<F: Fn(String)>(bin: &Path, port: u16, on_url: &F) -> Result<()
         }
         // "canceled" = the browser dropped a request (closed a photo, scrolled on): not a problem.
         if line.contains(" ERR ") && !line.contains("canceled") {
-            crate::log!("cloudflared: {}", line.trim());
+            if let Some(note) = repeats.check(&line, Instant::now()) {
+                crate::log!("cloudflared: {}{note}", line.trim());
+            }
         }
     }
     let status = child.wait().await?;
     bail!("cloudflared завершился ({status})")
+}
+
+/// Some cloudflared errors repeat every few minutes for hours (e.g. "Failed to refresh DNS
+/// local resolver" on networks with a slow DNS) while the tunnel works fine. Each distinct
+/// message is logged at most once per [`REPEAT_WINDOW`], with how many copies were skipped.
+const REPEAT_WINDOW: Duration = Duration::from_secs(6 * 3600);
+
+#[derive(Default)]
+struct RepeatFilter {
+    /// Message without its timestamp -> when it was last logged, copies skipped since.
+    seen: std::collections::HashMap<String, (Instant, u32)>,
+}
+
+impl RepeatFilter {
+    /// `Some(suffix)` when the line should be logged now.
+    fn check(&mut self, line: &str, now: Instant) -> Option<String> {
+        let key = line.split_once(" ERR ").map_or(line, |(_, msg)| msg).trim().to_string();
+        match self.seen.get_mut(&key) {
+            Some((last, skipped)) if now.duration_since(*last) < REPEAT_WINDOW => {
+                *skipped += 1;
+                None
+            }
+            Some((last, skipped)) => {
+                let note = if *skipped == 0 { String::new() } else { format!(" (повторялось ещё {skipped} раз)") };
+                *last = now;
+                *skipped = 0;
+                Some(note)
+            }
+            None => {
+                self.seen.insert(key, (now, 0));
+                Some(" (повторы скрываются на 6 ч)".to_string())
+            }
+        }
+    }
 }
 
 /// Windows would open a console window for cloudflared (visible when we run in the background).
@@ -194,5 +231,18 @@ mod tests {
         assert_eq!(extract_url(line).as_deref(), Some("https://lazy-river-bold-cat.trycloudflare.com"));
         assert_eq!(extract_url("INF Requesting new quick Tunnel on trycloudflare.com..."), None);
         assert_eq!(extract_url("see https://developers.cloudflare.com/docs"), None);
+    }
+
+    #[test]
+    fn repeated_errors_are_logged_rarely() {
+        let mut f = RepeatFilter::default();
+        let t0 = Instant::now();
+        let a = |ts: &str| format!("{ts} ERR Failed to refresh DNS local resolver error=\"timeout\"");
+        assert!(f.check(&a("2026-10-29T13:29:35Z"), t0).is_some());
+        assert!(f.check(&a("2026-10-29T13:34:40Z"), t0 + Duration::from_secs(300)).is_none());
+        assert!(f.check(&a("2026-10-29T13:39:45Z"), t0 + Duration::from_secs(600)).is_none());
+        assert!(f.check("2026-10-29T13:40:00Z ERR other problem", t0 + Duration::from_secs(601)).is_some());
+        let later = f.check(&a("2026-10-29T20:00:00Z"), t0 + REPEAT_WINDOW + Duration::from_secs(1));
+        assert_eq!(later.as_deref(), Some(" (повторялось ещё 2 раз)"));
     }
 }

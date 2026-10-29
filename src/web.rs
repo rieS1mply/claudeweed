@@ -850,7 +850,20 @@ struct InitBody {
     last_modified: i64,
 }
 
+/// Kept free on the storage disk, so an upload never fills it up completely.
+const DISK_RESERVE: u64 = 1024 * 1024 * 1024;
+
 async fn upload_init(State(app): State<App>, Json(body): Json<InitBody>) -> Response {
+    // The size is known up front: refuse now rather than fail after hours of uploading.
+    if let Ok(free) = fs4::available_space(&app.paths.uploads) {
+        if body.size.saturating_add(DISK_RESERVE) > free {
+            let gb = |b: u64| b as f64 / 1024f64.powi(3);
+            return error(
+                StatusCode::INSUFFICIENT_STORAGE,
+                &format!("Не хватает места на диске: свободно {:.1} ГБ, файл {:.1} ГБ", gb(free.saturating_sub(DISK_RESERVE)), gb(body.size)),
+            );
+        }
+    }
     let id = auth::random_hex(16);
     let tmp = app.paths.uploads.join(format!("{id}.part"));
     let file = match tokio::fs::File::create(&tmp).await {

@@ -189,7 +189,9 @@ pub fn sanitize_filename(raw: &str) -> String {
         name = "file".to_string();
     }
     let (stem, _) = split_ext(&name);
-    if WINDOWS_RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem)) {
+    // A leading dot would make the file hidden: [`list`] skips such names (".env", or "???.txt"
+    // once the "?" are dropped), so it would be stored but never shown.
+    if name.starts_with('.') || WINDOWS_RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem)) {
         name = format!("_{name}");
     }
     // Keep names well under the 255-byte limit of most file systems.
@@ -324,7 +326,7 @@ pub fn list(root: &Path) -> Vec<Item> {
             }
         }
     }
-    items.sort_by(|a, b| b.date.cmp(&a.date));
+    items.sort_by_key(|i| std::cmp::Reverse(i.date));
     items
 }
 
@@ -368,6 +370,8 @@ mod tests {
         assert_eq!(sanitize_filename("con.txt"), "_con.txt");
         assert_eq!(sanitize_filename("name. . "), "name");
         assert_eq!(sanitize_filename("Фото с моря.jpg"), "Фото с моря.jpg");
+        assert_eq!(sanitize_filename(".env"), "_.env");
+        assert_eq!(sanitize_filename("???.txt"), "_.txt");
     }
 
     #[test]

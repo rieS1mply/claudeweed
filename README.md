@@ -31,6 +31,13 @@
 
 Нужен Rust (https://rustup.rs).
 
+Для разработки — тестовая установка рядом с исходниками, без туннеля и не трогая настоящее облако (подробнее в [CLAUDE.md](CLAUDE.md)):
+
+```sh
+cargo run --release --example dev_setup                      # создаёт .dev/ (логин dev, пароль devpassword)
+cargo run --release -- --dir .dev --no-tunnel --port 8788     # http://127.0.0.1:8788
+```
+
 ```sh
 cargo build --release          # для текущей системы → target/release/local-photo
 ```
@@ -115,7 +122,7 @@ status.json работающего облака, sessions.json и cloudflared:
 - Превью для HEIC/RAW не строятся (показывается значок), сами файлы хранятся и скачиваются как есть. HEIC открывается в Safari.
 - У видео нет превью-кадра, но оно воспроизводится в браузере (MP4; MOV — в Safari и обычно в Chrome на Mac).
 - Бесплатный туннель Cloudflare не даёт гарантий доступности и меняет адрес при каждом перезапуске.
-- Терминал на Windows (PowerShell через ConPTY) собирается, но ещё не проверялся на живой системе. Старые браузеры без `DecompressionStream` (Safari до 16.4) получают вывод без сжатия.
+- Старые браузеры без `DecompressionStream` (Safari до 16.4) получают вывод терминала без сжатия.
 
 ## Структура кода
 

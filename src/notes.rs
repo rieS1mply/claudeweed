@@ -58,7 +58,7 @@ pub fn list(dir: &Path) -> Vec<NoteMeta> {
             Some(NoteMeta { id: id.to_string(), title, preview, updated })
         })
         .collect();
-    notes.sort_by(|a, b| b.updated.cmp(&a.updated));
+    notes.sort_by_key(|n| std::cmp::Reverse(n.updated));
     notes
 }
 

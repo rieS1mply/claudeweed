@@ -7,18 +7,30 @@ use serde_json::{json, Value};
 
 use crate::config::TelegramConfig;
 
-fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()
-        .expect("http client")
+/// One client for everything: the connection to api.telegram.org is reused between
+/// long polls instead of doing DNS + TLS again every minute.
+fn client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(20))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .build()
+            .expect("http client")
+    });
+    &CLIENT
 }
 
+/// Ordinary requests; a long poll gets its own wait time on top of this.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
 async fn call(token: &str, method: &str, body: Value) -> Result<Value> {
+    // getUpdates holds the request open for up to `timeout` seconds by design.
+    let wait = body["timeout"].as_u64().map_or(Duration::ZERO, Duration::from_secs);
     let url = format!("https://api.telegram.org/bot{token}/{method}");
     // Errors must not carry the URL: it contains the bot token.
     let res: Value = client()
         .post(url)
+        .timeout(REQUEST_TIMEOUT + wait)
         .json(&body)
         .send()
         .await
@@ -81,10 +93,9 @@ pub async fn download_file(token: &str, file_id: &str) -> Result<Vec<u8>> {
     let file = call(token, "getFile", json!({ "file_id": file_id })).await?;
     let Some(path) = file["file_path"].as_str() else { bail!("Telegram не отдал путь к файлу") };
     let url = format!("https://api.telegram.org/file/bot{token}/{path}");
-    let res = reqwest::Client::builder()
-        .timeout(Duration::from_secs(300))
-        .build()?
+    let res = client()
         .get(url)
+        .timeout(Duration::from_secs(300))
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
