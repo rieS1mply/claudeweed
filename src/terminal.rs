@@ -1,0 +1,385 @@
+//! Remote terminal: one shell on this computer, shared by every open terminal tab.
+//!
+//! The shell keeps running when the browser disconnects (a phone switching networks,
+//! a closed laptop lid); reconnecting replays the recent output, so the screen comes
+//! back as it was. Off unless `"terminal": true` in config.json — whoever knows the
+//! password controls the computer.
+//!
+//! Protocol over one WebSocket, binary frames only:
+//! - server → client: terminal output, raw-deflate compressed as one continuous stream
+//!   (`?z=1`, sync flush per frame), or plain bytes;
+//! - client → server: `0` + input bytes, `1` + cols(u16 BE) + rows(u16 BE), `2` = kill the shell.
+
+use std::collections::{HashMap, VecDeque};
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
+use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use flate2::{Compress, Compression, FlushCompress};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use tokio::sync::{broadcast, watch};
+
+/// Output kept for replay on reconnect.
+const HISTORY: usize = 128 * 1024;
+/// Output chunks a slow client may fall behind before it is resynced from the history.
+const BACKLOG: usize = 512;
+/// Below this, output goes out at once (typing echo); above, wait briefly to batch a burst.
+const INTERACTIVE: usize = 1024;
+const BATCH_WAIT: Duration = Duration::from_millis(5);
+const MAX_FRAME: usize = 64 * 1024;
+/// Cloudflare drops WebSockets idle for ~100 s.
+const PING_EVERY: Duration = Duration::from_secs(25);
+const PONG_TIMEOUT: Duration = Duration::from_secs(70);
+/// One Telegram message per address per this long, not one per reconnect.
+const NOTIFY_EVERY: Duration = Duration::from_secs(3600);
+
+/// WebSocket close codes the page understands.
+pub const CLOSE_RESYNC: u16 = 4000;
+pub const CLOSE_EXITED: u16 = 4001;
+pub const CLOSE_LOGGED_OUT: u16 = 4401;
+pub const CLOSE_DISABLED: u16 = 4403;
+
+#[derive(Default)]
+pub struct Terminal {
+    shell: Mutex<Option<Arc<Shell>>>,
+    notified: Mutex<HashMap<String, Instant>>,
+}
+
+struct Shell {
+    input: std::sync::mpsc::Sender<Vec<u8>>,
+    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
+    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// Recent output; locked together with `subscribe` so a new client sees every byte exactly once.
+    history: Mutex<VecDeque<u8>>,
+    output: broadcast::Sender<Arc<[u8]>>,
+    exited: watch::Sender<bool>,
+    dead: AtomicBool,
+}
+
+impl Terminal {
+    /// The running shell, or a new one if there is none (or the last one exited).
+    fn shell(&self) -> Result<Arc<Shell>> {
+        let mut slot = self.shell.lock().unwrap();
+        if let Some(s) = slot.as_ref().filter(|s| !s.dead.load(Ordering::SeqCst)) {
+            return Ok(s.clone());
+        }
+        let shell = Shell::spawn(default_shell())?;
+        *slot = Some(shell.clone());
+        Ok(shell)
+    }
+
+    /// Ends the shell (and what runs in it) when the cloud stops.
+    pub fn shutdown(&self) {
+        if let Some(s) = self.shell.lock().unwrap().take() {
+            s.kill();
+        }
+    }
+
+    /// True once per address per hour: worth a Telegram message.
+    pub fn should_notify(&self, ip: &str) -> bool {
+        let mut map = self.notified.lock().unwrap();
+        map.retain(|_, t| t.elapsed() < NOTIFY_EVERY);
+        if map.contains_key(ip) {
+            return false;
+        }
+        map.insert(ip.to_string(), Instant::now());
+        true
+    }
+}
+
+/// The user's login shell (macOS/Linux), PowerShell on Windows. Starts in the home folder.
+fn default_shell() -> CommandBuilder {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = CommandBuilder::new("powershell.exe");
+        c.arg("-NoLogo");
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = CommandBuilder::new_default_prog();
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        cmd.cwd(home);
+    }
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    // Started by launchd/systemd there may be no locale, and Cyrillic would show as "?".
+    #[cfg(not(windows))]
+    if std::env::var_os("LANG").is_none() && std::env::var_os("LC_ALL").is_none() {
+        cmd.env("LANG", if cfg!(target_os = "macos") { "en_US.UTF-8" } else { "C.UTF-8" });
+    }
+    cmd
+}
+
+impl Shell {
+    fn spawn(cmd: CommandBuilder) -> Result<Arc<Shell>> {
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .context("не удалось открыть терминал")?;
+        let mut child = pair.slave.spawn_command(cmd).context("не удалось запустить оболочку")?;
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader()?;
+        let mut writer = pair.master.take_writer()?;
+        let (input, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+
+        let shell = Arc::new(Shell {
+            input,
+            killer: Mutex::new(child.clone_killer()),
+            master: Mutex::new(Some(pair.master)),
+            history: Mutex::new(VecDeque::with_capacity(HISTORY)),
+            output: broadcast::channel(BACKLOG).0,
+            exited: watch::channel(false).0,
+            dead: AtomicBool::new(false),
+        });
+
+        // Writes to the shell can block (it isn't reading), so they get their own thread.
+        std::thread::spawn(move || {
+            while let Ok(bytes) = input_rx.recv() {
+                if writer.write_all(&bytes).and_then(|_| writer.flush()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let out = shell.clone();
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => out.push_output(&buf[..n]),
+                }
+            }
+            out.dead.store(true, Ordering::SeqCst);
+            out.exited.send_replace(true);
+        });
+
+        // When the shell exits, close the PTY so the reader sees the end even if a
+        // background job still holds it open (and on Windows, where it never would).
+        let waiter = shell.clone();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+            std::thread::sleep(Duration::from_millis(300));
+            waiter.master.lock().unwrap().take();
+        });
+
+        crate::log!("Терминал: запущена новая оболочка");
+        Ok(shell)
+    }
+
+    fn push_output(&self, bytes: &[u8]) {
+        let mut history = self.history.lock().unwrap();
+        history.extend(bytes);
+        if history.len() > HISTORY {
+            let mut cut = history.len() - HISTORY;
+            // Start the replay at a line boundary rather than mid-escape-sequence.
+            if let Some(nl) = history.range(cut..).take(4096).position(|&b| b == b'\n') {
+                cut += nl + 1;
+            }
+            history.drain(..cut);
+        }
+        let _ = self.output.send(bytes.into());
+    }
+
+    fn attach(&self) -> (Vec<u8>, broadcast::Receiver<Arc<[u8]>>) {
+        let history = self.history.lock().unwrap();
+        let rx = self.output.subscribe();
+        (history.iter().copied().collect(), rx)
+    }
+
+    fn resize(&self, cols: u16, rows: u16) {
+        if let Some(m) = self.master.lock().unwrap().as_ref() {
+            let _ = m.resize(PtySize { rows: rows.max(2), cols: cols.max(2), pixel_width: 0, pixel_height: 0 });
+        }
+    }
+
+    fn kill(&self) {
+        let _ = self.killer.lock().unwrap().kill();
+    }
+}
+
+/// Raw deflate, one context per connection: repeated prompts and colors compress to almost nothing.
+pub struct Deflater(Compress);
+
+impl Deflater {
+    pub fn new() -> Self {
+        Deflater(Compress::new(Compression::fast(), false))
+    }
+
+    /// Compresses `data` and sync-flushes, so the browser can show it right away.
+    pub fn frame(&mut self, mut data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(data.len() / 2 + 64);
+        loop {
+            if out.capacity() - out.len() < 64 {
+                out.reserve(out.capacity().max(1024));
+            }
+            let before = self.0.total_in();
+            self.0.compress_vec(data, &mut out, FlushCompress::Sync).expect("deflate");
+            data = &data[(self.0.total_in() - before) as usize..];
+            // Done when all input is consumed and the flush fit in the spare room.
+            if data.is_empty() && out.len() < out.capacity() {
+                return out;
+            }
+        }
+    }
+}
+
+pub struct Client {
+    pub compress: bool,
+    pub ip: String,
+    /// Still logged in and the terminal still enabled; checked on every ping.
+    pub still_allowed: Box<dyn Fn() -> Option<u16> + Send>,
+}
+
+/// Runs one browser connection until it closes.
+pub async fn serve(term: Arc<Terminal>, mut ws: WebSocket, client: Client) {
+    let shell = match term.shell() {
+        Ok(s) => s,
+        Err(e) => {
+            crate::log!("Терминал: {e:#}");
+            let _ = ws.send(close(CLOSE_EXITED, "не удалось запустить оболочку")).await;
+            return;
+        }
+    };
+    let (history, mut rx) = shell.attach();
+    let mut exited = shell.exited.subscribe();
+    let mut deflate = client.compress.then(Deflater::new);
+    let mut encode = move |data: &[u8]| match deflate.as_mut() {
+        Some(d) => d.frame(data),
+        None => data.to_vec(),
+    };
+
+    if !history.is_empty() && ws.send(Message::Binary(encode(&history).into())).await.is_err() {
+        return;
+    }
+    let mut ping = tokio::time::interval(PING_EVERY);
+    ping.tick().await;
+    let mut last_heard = Instant::now();
+
+    let reason = loop {
+        tokio::select! {
+            out = rx.recv() => {
+                let mut batch = match out {
+                    Ok(chunk) => chunk.to_vec(),
+                    // Too far behind: reconnecting replays the history, cheaper than the backlog.
+                    Err(broadcast::error::RecvError::Lagged(_)) => break close(CLOSE_RESYNC, "resync"),
+                    Err(broadcast::error::RecvError::Closed) => break close(CLOSE_EXITED, "exited"),
+                };
+                let deadline = tokio::time::Instant::now() + BATCH_WAIT;
+                while batch.len() < MAX_FRAME {
+                    let next = if batch.len() < INTERACTIVE {
+                        rx.try_recv().ok()
+                    } else {
+                        tokio::time::timeout_at(deadline, rx.recv()).await.ok().and_then(Result::ok)
+                    };
+                    match next {
+                        Some(chunk) => batch.extend_from_slice(&chunk),
+                        None => break,
+                    }
+                }
+                if ws.send(Message::Binary(encode(&batch).into())).await.is_err() {
+                    return;
+                }
+            }
+            msg = ws.recv() => {
+                last_heard = Instant::now();
+                match msg {
+                    Some(Ok(Message::Binary(b))) => match b.first() {
+                        Some(0) => {
+                            let _ = shell.input.send(b[1..].to_vec());
+                        }
+                        Some(1) if b.len() == 5 => {
+                            shell.resize(u16::from_be_bytes([b[1], b[2]]), u16::from_be_bytes([b[3], b[4]]));
+                        }
+                        Some(2) => {
+                            crate::log!("Терминал: оболочка перезапущена из браузера (адрес: {})", client.ip);
+                            shell.kill();
+                        }
+                        _ => {}
+                    },
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                    Some(Ok(_)) => {}
+                }
+            }
+            _ = exited.changed() => {
+                // Let the last output reach this client first.
+                while let Ok(chunk) = rx.try_recv() {
+                    if ws.send(Message::Binary(encode(&chunk).into())).await.is_err() {
+                        return;
+                    }
+                }
+                break close(CLOSE_EXITED, "exited");
+            }
+            _ = ping.tick() => {
+                if let Some(code) = (client.still_allowed)() {
+                    if code == CLOSE_DISABLED {
+                        // Turned off while running: nobody should keep a shell.
+                        term.shutdown();
+                    }
+                    break close(code, "");
+                }
+                if last_heard.elapsed() > PONG_TIMEOUT || ws.send(Message::Ping(Default::default())).await.is_err() {
+                    return;
+                }
+            }
+        }
+    };
+    let _ = ws.send(reason).await;
+}
+
+fn close(code: u16, reason: &'static str) -> Message {
+    Message::Close(Some(CloseFrame { code, reason: reason.into() }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::{Decompress, FlushDecompress};
+
+    #[test]
+    fn deflate_frames_decode_one_by_one() {
+        let mut d = Deflater::new();
+        let mut inflate = Decompress::new(false);
+        let big = "строка вывода 0123456789\r\n".repeat(20_000);
+        for msg in ["$ ", "ls\r\n", big.as_str(), "$ "] {
+            let frame = d.frame(msg.as_bytes());
+            let mut out = Vec::with_capacity(msg.len() + 1024);
+            inflate.decompress_vec(&frame, &mut out, FlushDecompress::Sync).unwrap();
+            assert_eq!(out, msg.as_bytes(), "each frame must decode fully on its own");
+        }
+        assert!(d.frame(big.as_bytes()).len() < big.len() / 20, "repeated output should shrink a lot");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_output_reaches_history_and_exit_is_seen() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", "echo hello-from-pty"]);
+        let shell = Shell::spawn(cmd).unwrap();
+        let mut exited = shell.exited.subscribe();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !*exited.borrow_and_update() {
+            assert!(Instant::now() < deadline, "shell did not exit");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (history, _) = shell.attach();
+        assert!(String::from_utf8_lossy(&history).contains("hello-from-pty"));
+        assert!(shell.dead.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn history_is_capped_at_a_line_start() {
+        let mut cmd = CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
+        cmd.args(if cfg!(windows) { ["/c", "rem"] } else { ["-c", "true"] });
+        let shell = Shell::spawn(cmd).unwrap();
+        for i in 0..20_000 {
+            shell.push_output(format!("line {i}\r\n").as_bytes());
+        }
+        let (history, _) = shell.attach();
+        assert!(history.len() <= HISTORY);
+        assert!(history.starts_with(b"line "));
+        assert!(history.ends_with(b"line 19999\r\n"));
+    }
+}

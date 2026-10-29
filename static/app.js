@@ -691,6 +691,9 @@ function showApp() {
   animate($('#content'), [{ transform: 'translateY(16px)' }, { transform: 'none' }], 'smooth', { fill: 'none' });
   onScroll();
   load(state.section);
+  // The terminal is off unless the computer's owner turned it on (local-photo --terminal on).
+  $('#term-btn').hidden = true;
+  if (!MOCK) api.session().then((s) => { $('#term-btn').hidden = !s?.terminal; }).catch(() => {});
 }
 
 async function onLogin(e) {

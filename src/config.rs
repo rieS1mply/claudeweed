@@ -122,6 +122,9 @@ pub struct Config {
     pub port: u16,
     #[serde(default)]
     pub telegram: Option<TelegramConfig>,
+    /// Terminal of this computer on the site. Off unless the owner turns it on.
+    #[serde(default)]
+    pub terminal: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -388,12 +391,16 @@ pub async fn setup(path: &Path, previous: Option<&Config>, suggestion: Option<&P
         }
     };
 
+    println!();
+    let terminal = ask_terminal()?;
+
     let config = Config {
         storage_dir: Some(storage_dir.clone()),
         username,
         password_hash: hash_password(&password)?,
         port: previous.map_or(DEFAULT_PORT, |c| c.port),
         telegram,
+        terminal,
     };
     config.save(path)?;
     println!();
@@ -403,6 +410,15 @@ pub async fn setup(path: &Path, previous: Option<&Config>, suggestion: Option<&P
     println!("(или исправьте storage_dir в файле настроек).");
     println!();
     Ok(config)
+}
+
+/// Shown at setup; the owner of the computer decides.
+fn ask_terminal() -> Result<bool> {
+    println!("Терминал: с сайта можно будет выполнять любые команды на этом компьютере");
+    println!("(с ноутбука или телефона). Кто знает пароль — управляет компьютером.");
+    println!("О каждом входе в терминал придёт сообщение в Telegram.");
+    let on = ask("Включить терминал на сайте? [д/Н]: ")?;
+    Ok(matches!(on.to_lowercase().as_str(), "д" | "да" | "y" | "yes"))
 }
 
 async fn connect_telegram(token: &str) -> Result<TelegramConfig> {
@@ -445,7 +461,7 @@ mod tests {
         let old_system = base.join(SYSTEM_DIR);
         std::fs::create_dir_all(old_system.join("trash/abc")).unwrap();
         std::fs::create_dir_all(base.join(LEGACY_STORAGE_DIR).join("Фото")).unwrap();
-        let cfg = Config { storage_dir: None, username: "u".into(), password_hash: "h".into(), port: 1, telegram: None };
+        let cfg = Config { storage_dir: None, username: "u".into(), password_hash: "h".into(), port: 1, telegram: None, terminal: false };
         cfg.save(&old_system.join(CONFIG_FILE)).unwrap();
         let config_dir = base.join("settings");
 

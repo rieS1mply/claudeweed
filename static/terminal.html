@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Терминал</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="xterm.css">
+<link rel="stylesheet" href="terminal.css">
+</head>
+<body class="term-page">
+
+<header class="term-bar">
+  <a class="btn glass round" href="/" title="Облако">
+    <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+  </a>
+  <div class="term-title">
+    <span class="term-dot" id="term-dot" data-state="connecting"></span>
+    <span>Терминал</span>
+    <span class="term-traffic" id="term-traffic"></span>
+  </div>
+  <div class="term-tools">
+    <button class="btn glass round" id="term-smaller" type="button" title="Мельче">
+      <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M6 12h12"/></svg>
+    </button>
+    <button class="btn glass round" id="term-bigger" type="button" title="Крупнее">
+      <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M12 6v12M6 12h12"/></svg>
+    </button>
+    <button class="btn glass round" id="term-restart" type="button" title="Новый сеанс (закрыть оболочку)">
+      <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+    </button>
+  </div>
+</header>
+
+<main class="term-wrap" id="term-wrap">
+  <div id="term" class="term"></div>
+  <div class="term-overlay" id="term-overlay" hidden>
+    <div class="term-msg glass">
+      <div id="term-msg-text"></div>
+      <button class="btn primary" id="term-msg-btn" type="button" hidden></button>
+    </div>
+  </div>
+</main>
+
+<!-- Keys a phone keyboard doesn't have. -->
+<nav class="term-keys" id="term-keys" aria-label="Клавиши">
+  <button data-key="esc">Esc</button>
+  <button data-key="tab">Tab</button>
+  <button data-key="ctrl" class="latch" id="key-ctrl">Ctrl</button>
+  <button data-key="^c">^C</button>
+  <button data-key="left">←</button>
+  <button data-key="up">↑</button>
+  <button data-key="down">↓</button>
+  <button data-key="right">→</button>
+  <button data-key="|">|</button>
+  <button data-key="~">~</button>
+  <button data-key="/">/</button>
+  <button data-key="-">-</button>
+</nav>
+
+<script src="xterm.js"></script>
+<script src="xterm-addon-fit.js"></script>
+<script src="terminal.js"></script>
+</body>
+</html>

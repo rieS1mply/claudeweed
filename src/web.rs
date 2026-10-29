@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{DefaultBodyLimit, Path as UrlPath, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -23,7 +24,7 @@ use tower_http::services::ServeFile;
 use crate::auth::{self, Auth};
 use crate::config::{Config, Paths};
 use crate::storage::{self, Kind, Section};
-use crate::{notes, thumbs, trash, zips};
+use crate::{notes, telegram, terminal, thumbs, trash, zips};
 
 /// Matches CHUNK_SIZE in app.js, with headroom.
 const MAX_CHUNK: usize = 20 * 1024 * 1024;
@@ -47,6 +48,7 @@ pub struct AppState {
     /// Serializes "pick a free name + move file there".
     place_lock: Mutex<()>,
     zips: zips::Jobs,
+    pub terminal: Arc<terminal::Terminal>,
 }
 
 struct Upload {
@@ -73,11 +75,17 @@ impl AppState {
             thumb_slots: Semaphore::new(3),
             place_lock: Mutex::new(()),
             zips: Default::default(),
+            terminal: Default::default(),
         })
     }
 
     fn section_root(&self, section: Section) -> PathBuf {
         self.paths.storage.join(section.dir_name())
+    }
+
+    /// Read from config.json on every use, so `--terminal off` works without a restart.
+    fn terminal_enabled(&self) -> bool {
+        Config::load(&self.paths.config).ok().flatten().map_or(self.config.terminal, |c| c.terminal)
     }
 
     /// Folder of a section by its API name, including "notes".
@@ -114,6 +122,7 @@ pub fn router(app: App) -> Router {
             get(upload_status).put(upload_chunk).layer(DefaultBodyLimit::max(MAX_CHUNK)),
         )
         .route("/api/upload/{id}/finish", post(upload_finish))
+        .route("/api/terminal", get(terminal_ws))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_session));
 
     Router::new()
@@ -122,6 +131,7 @@ pub fn router(app: App) -> Router {
         .route("/api/local/stop", post(local_stop))
         .merge(protected)
         .route("/", get(index))
+        .route("/terminal.html", get(terminal_page))
         .route("/{file}", get(asset))
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(force_https))
@@ -176,9 +186,10 @@ fn csrf_ok(headers: &HeaderMap) -> bool {
     if headers.get("x-cloud").and_then(|v| v.to_str().ok()) != Some("1") {
         return false;
     }
-    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
-        return true;
-    };
+    headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).is_none_or(|origin| same_origin(headers, origin))
+}
+
+fn same_origin(headers: &HeaderMap, origin: &str) -> bool {
     let origin_host = origin.split_once("://").map_or(origin, |(_, h)| h);
     [headers.get("x-forwarded-host"), headers.get(header::HOST)]
         .into_iter()
@@ -259,32 +270,87 @@ fn content_disposition(kind: &str, name: &str) -> HeaderValue {
 
 // ---------- static UI ----------
 
-async fn index() -> Response {
-    asset_response("index.html")
+async fn index(headers: HeaderMap) -> Response {
+    asset_response("index.html", &headers)
 }
 
-async fn asset(UrlPath(file): UrlPath<String>) -> Response {
-    asset_response(&file)
+async fn asset(UrlPath(file): UrlPath<String>, headers: HeaderMap) -> Response {
+    asset_response(&file, &headers)
 }
 
-fn asset_response(name: &str) -> Response {
-    match Assets::get(name) {
-        Some(file) => {
-            let mime = mime_guess::from_path(name).first_or_octet_stream();
-            (
-                [(header::CONTENT_TYPE, mime.as_ref().to_string()), (header::CACHE_CONTROL, "no-cache".to_string())],
-                file.data.into_owned(),
-            )
-                .into_response()
-        }
-        None => StatusCode::NOT_FOUND.into_response(),
+/// xterm.js adds <style> elements at runtime, so this page alone allows inline styles.
+/// The WebSocket host is spelled out: older Safari doesn't count wss: as 'self'.
+async fn terminal_page(headers: HeaderMap) -> Response {
+    let mut res = asset_response("terminal.html", &headers);
+    let hosts: String = [headers.get("x-forwarded-host"), headers.get(header::HOST)]
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.to_str().ok())
+        .filter(|h| h.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.:[]".contains(&b)))
+        .map(|h| format!(" wss://{h} ws://{h}"))
+        .collect();
+    let csp = format!(
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'{hosts}; \
+         img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    );
+    if let Ok(v) = HeaderValue::from_str(&csp) {
+        res.headers_mut().insert(header::CONTENT_SECURITY_POLICY, v);
     }
+    res
+}
+
+/// Gzipped copies of the embedded files, keyed by name and content hash.
+static GZIPPED: std::sync::LazyLock<std::sync::Mutex<HashMap<String, (String, Bytes)>>> = std::sync::LazyLock::new(Default::default);
+
+/// Served with an ETag (a repeat visit costs a few hundred bytes, not the whole UI)
+/// and gzipped when the browser accepts it.
+fn asset_response(name: &str, headers: &HeaderMap) -> Response {
+    let Some(file) = Assets::get(name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let etag = format!("\"{}\"", file.metadata.sha256_hash()[..12].iter().map(|b| format!("{b:02x}")).collect::<String>());
+    let mime = mime_guess::from_path(name).first_or_octet_stream();
+    let mut res = if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).is_some_and(|v| v.contains(&etag)) {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        let accepts_gzip = headers.get(header::ACCEPT_ENCODING).and_then(|v| v.to_str().ok()).is_some_and(|v| v.contains("gzip"));
+        let compressible = matches!(mime.type_(), mime_guess::mime::TEXT | mime_guess::mime::APPLICATION) && file.data.len() > 1024;
+        if accepts_gzip && compressible {
+            let body = {
+                let mut cache = GZIPPED.lock().unwrap();
+                match cache.get(name) {
+                    Some((tag, gz)) if *tag == etag => gz.clone(),
+                    _ => {
+                        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+                        let _ = std::io::Write::write_all(&mut enc, &file.data);
+                        let gz = Bytes::from(enc.finish().unwrap_or_default());
+                        cache.insert(name.to_string(), (etag.clone(), gz.clone()));
+                        gz
+                    }
+                }
+            };
+            ([(header::CONTENT_ENCODING, "gzip")], body).into_response()
+        } else {
+            Body::from(file.data.into_owned()).into_response()
+        }
+    };
+    let h = res.headers_mut();
+    if let Ok(v) = HeaderValue::from_str(mime.as_ref()) {
+        h.insert(header::CONTENT_TYPE, v);
+    }
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    h.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    if let Ok(v) = HeaderValue::from_str(&etag) {
+        h.insert(header::ETAG, v);
+    }
+    res
 }
 
 // ---------- auth ----------
 
 async fn session(State(app): State<App>, headers: HeaderMap) -> Response {
-    Json(json!({ "authenticated": app.auth.is_valid(&headers) })).into_response()
+    let authenticated = app.auth.is_valid(&headers);
+    Json(json!({ "authenticated": authenticated, "terminal": authenticated && app.terminal_enabled() })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -343,6 +409,50 @@ async fn local_stop(State(app): State<App>, headers: HeaderMap) -> Response {
 async fn logout(State(app): State<App>, headers: HeaderMap) -> Response {
     app.auth.end_session(&headers);
     ([(header::SET_COOKIE, auth::clear_cookie_header())], Json(json!({ "ok": true }))).into_response()
+}
+
+// ---------- terminal ----------
+
+#[derive(Deserialize)]
+struct TerminalQuery {
+    #[serde(default)]
+    z: Option<String>,
+}
+
+async fn terminal_ws(State(app): State<App>, headers: HeaderMap, Query(q): Query<TerminalQuery>, ws: WebSocketUpgrade) -> Response {
+    if !app.terminal_enabled() {
+        return not_found();
+    }
+    // Browsers send Origin on every WebSocket; without this check any site the user
+    // visits could open the shell with their cookie.
+    if !headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).is_some_and(|o| same_origin(&headers, o)) {
+        return error(StatusCode::FORBIDDEN, "Запрос отклонён");
+    }
+    let ip = auth::client_ip(&headers);
+    crate::log!("Терминал: подключение (адрес: {ip})");
+    if let Some(tg) = app.config.telegram.clone().filter(|_| app.terminal.should_notify(&ip)) {
+        let text = format!("Открыт терминал облака (адрес: {ip}). Если это не вы — смените пароль: local-photo --setup");
+        tokio::spawn(async move { telegram::send_with_retry(&tg, &text).await });
+    }
+    let check = app.clone();
+    let client = terminal::Client {
+        compress: q.z.as_deref() == Some("1"),
+        ip: ip.clone(),
+        still_allowed: Box::new(move || {
+            if !check.auth.is_valid(&headers) {
+                Some(terminal::CLOSE_LOGGED_OUT)
+            } else if !check.terminal_enabled() {
+                Some(terminal::CLOSE_DISABLED)
+            } else {
+                None
+            }
+        }),
+    };
+    let term = app.terminal.clone();
+    ws.on_upgrade(move |socket| async move {
+        terminal::serve(term, socket, client).await;
+        crate::log!("Терминал: отключение (адрес: {ip})");
+    })
 }
 
 // ---------- browsing ----------

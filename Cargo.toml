@@ -7,7 +7,7 @@ description = "Personal home cloud: photo/file storage served through a Cloudfla
 [dependencies]
 anyhow = "1"
 argon2 = "0.5"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 chrono = "0.4"
 filetime = "0.2"
 flate2 = "1"
@@ -15,6 +15,7 @@ getrandom = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
 kamadak-exif = "0.6"
 mime_guess = "2"
+portable-pty = "0.9"
 qrcode = { version = "0.14", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rpassword = "7"

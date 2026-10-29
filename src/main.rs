@@ -12,6 +12,7 @@ mod notes;
 mod service;
 mod storage;
 mod telegram;
+mod terminal;
 mod thumbs;
 mod trash;
 mod tunnel;
@@ -45,6 +46,7 @@ struct Args {
     status: bool,
     stop: bool,
     autostart: Option<bool>,
+    terminal: Option<bool>,
 }
 
 const HELP: &str = "\
@@ -56,6 +58,7 @@ local-photo — домашнее облако для фото и файлов
   --status            работает ли облако и по какому адресу
   --stop              остановить облако, работающее в фоне
   --autostart on|off  запускать облако само при входе в систему (в фоне) / не запускать
+  --terminal on|off   разрешить / запретить терминал этого компьютера на сайте
   --setup             выбрать папку хранилища, задать логин, пароль и Telegram заново
   --port <порт>       локальный порт (по умолчанию 8787)
   --no-tunnel         не открывать доступ из интернета (только http://127.0.0.1)
@@ -64,7 +67,7 @@ local-photo — домашнее облако для фото и файлов
 ";
 
 fn parse_args() -> Result<Args> {
-    let mut args = Args { dir: None, setup: false, no_tunnel: false, port: None, background: false, status: false, stop: false, autostart: None };
+    let mut args = Args { dir: None, setup: false, no_tunnel: false, port: None, background: false, status: false, stop: false, autostart: None, terminal: None };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -80,6 +83,13 @@ fn parse_args() -> Result<Args> {
                     Some("on") => true,
                     Some("off") => false,
                     _ => bail!("после --autostart нужно on или off"),
+                })
+            }
+            "--terminal" => {
+                args.terminal = Some(match it.next().as_deref() {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => bail!("после --terminal нужно on или off"),
                 })
             }
             "-h" | "--help" => {
@@ -139,6 +149,8 @@ async fn print_status(config_dir: &Path) -> Result<()> {
         None => println!("Облако не запущено."),
     }
     println!("  Автозапуск:  {autostart}");
+    let terminal = Config::load(&config_dir.join(config::CONFIG_FILE)).ok().flatten().is_some_and(|c| c.terminal);
+    println!("  Терминал:    {}", if terminal { "включён (--terminal off — выключить)" } else { "выключен" });
     println!("  Журнал:      {}", config_dir.join("local-photo.log").display());
     service::pause_if_own_window();
     Ok(())
@@ -162,6 +174,19 @@ async fn run() -> Result<()> {
     if args.stop {
         let stopped = service::stop(&config_dir).await?;
         println!("{}", if stopped { "Облако остановлено." } else { "Облако не было запущено." });
+        return Ok(());
+    }
+    if let Some(on) = args.terminal {
+        let mut config = Config::load(&config_file)?.context("сначала настройте облако: запустите программу без параметров")?;
+        config.terminal = on;
+        config.save(&config_file)?;
+        // The running cloud re-reads this on every connection: no restart needed.
+        if on {
+            println!("Терминал включён: кнопка «Терминал» появится на сайте после обновления страницы.");
+            println!("Кто знает пароль — может выполнять любые команды на этом компьютере.");
+        } else {
+            println!("Терминал выключен. Открытые сеансы закроются в течение 30 секунд.");
+        }
         return Ok(());
     }
     if let Some(on) = args.autostart {
@@ -288,6 +313,7 @@ async fn run() -> Result<()> {
         log!("Telegram-бот слушает чат: фото и файлы оттуда сохраняются в облако");
         tokio::spawn(bot::run(app.clone(), tg, public_url.clone()))
     });
+    let terminal = app.terminal.clone();
     let router = web::router(app);
 
     let tunnel = if args.no_tunnel {
@@ -346,6 +372,7 @@ async fn run() -> Result<()> {
         _ = deadline => log!("Не все соединения закрылись, завершаю принудительно"),
     }
 
+    terminal.shutdown();
     // Dropping the task kills cloudflared (kill_on_drop).
     for t in tunnel.into_iter().chain(bot) {
         t.abort();
