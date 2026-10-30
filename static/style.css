@@ -871,3 +871,24 @@ a.btn { color: inherit; text-decoration: none; }
 .md-view th, .md-view td { border: .5px solid var(--hairline); padding: 6px 10px; }
 .md-view th { background: var(--fill); }
 .md-view .align-center { text-align: center; } .md-view .align-right { text-align: right; }
+
+/* ---------- iPhone: top edge and bottom bar ---------- */
+/* Safari tints the status-bar area with the colour of a fixed bar at the top edge. Without
+   this strip it took the nav's dark glass and smeared it over the top of the screen; a
+   page-coloured strip there also keeps scrolled content from showing under the clock. */
+.top-edge {
+  position: fixed; z-index: 19; top: 0; left: 0; right: 0;
+  height: env(safe-area-inset-top); background: var(--bg); pointer-events: none;
+}
+/* A page shorter than the screen bounces as a whole on iOS, fixed bars included (Files and
+   Notes with few items; Photos is long enough to scroll normally). */
+#app { min-height: 100vh; min-height: 100dvh; }
+@media (display-mode: standalone) {
+  html, body { overscroll-behavior: none; }
+}
+/* Phone: links, language and logout move into "⋯", so the nav title has room. */
+#more-btn { display: none; }
+@media (max-width: 720px) {
+  #links-btn, #lang-btn, #logout-btn { display: none; }
+  #more-btn { display: inline-flex; }
+}

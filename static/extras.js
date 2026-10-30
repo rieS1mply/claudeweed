@@ -325,6 +325,11 @@ function closeMdView() {
 function bindExtras() {
   $('#search').addEventListener('input', searchContent);
   $('#links-btn').addEventListener('click', manageLinks);
+  $('#more-btn').addEventListener('click', () => actionSheet('', [
+    { label: t('Ссылки без пароля'), run: manageLinks },
+    { label: `${t('Язык')}: ${LANGS[LANG]}`, run: () => $('#lang-btn').click() },
+    { label: t('Выйти'), destructive: true, run: () => $('#logout-btn').click() },
+  ]));
   $('#lang-btn').addEventListener('click', () => actionSheet(t('Язык'), Object.entries(LANGS).map(([code, name]) => ({
     label: code === LANG ? `✓ ${name}` : name, run: () => { if (code !== LANG) setLang(code); },
   }))));
