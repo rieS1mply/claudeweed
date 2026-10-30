@@ -50,7 +50,7 @@
 
 Всё прежнее сделано в сессии 2026-10-30 (11). Новое (добавлено владельцем 2026-10-30):
 
-1. **Фиксированный адрес облака.** Сейчас адрес trycloudflare меняется при каждом перезапуске,
+1. **Фиксированный адрес облака** (код сделан в сессии 14, осталось войти в Tailscale — см. «Незакрыто»). Сейчас адрес trycloudflare меняется при каждом перезапуске,
    `--tunnel named` уже есть, но требует своего домена и ручной настройки в Cloudflare.
    План:
    - **уточнить у владельца**: покупать ли домен (~1–10 $/год; тогда именованный туннель
@@ -130,6 +130,26 @@
 ## История сессий
 
 Новые сверху.
+
+### 2026-10-30 (14) — постоянный адрес через Tailscale Funnel
+
+Просьба владельца: фиксированный домен, например через Tailscale.
+- `src/funnel.rs` (новый): `--tunnel funnel` проверяет Tailscale (`status --json`: вход, имя
+  компьютера), публикует порт (`tailscale funnel --bg --yes http://127.0.0.1:<порт>`; если Funnel
+  не разрешён в tailnet — показывает ссылку login.tailscale.com), сохраняет `config.funnel`
+  (https://…ts.net). При запуске облака вместо cloudflared — `funnel::run` (повтор раз в 10 мин,
+  адрес — в Telegram как обычно). `--tunnel quick|named` выключает публикацию.
+- `auth.rs`: `via_cloudflare` → `via_tunnel` (ещё `X-Forwarded-For`, `Tailscale-Funnel-Request`):
+  `/api/local/stop` отказывает и запросам через Funnel; `client_ip` берёт `X-Forwarded-For`
+  (защита от подбора видит настоящие адреса); перенаправление на https — только для Cloudflare.
+- README (раздел «Постоянный адрес»), CLAUDE.md, справка, английские тексты. 65 тестов, clippy чисто.
+- На компьютер установлен Tailscale 1.104.4 (winget `Tailscale.Tailscale`).
+- **Вход в Tailscale не получился из-за сети**: обычные DNS-запросы (порт 53) к любому серверу
+  получают «refused», Windows находит адреса лишь через ~8 с, служба Tailscale не дожидается
+  («failed to resolve controlplane.tailscale.com»). С разрешения владельца DNS адаптеров
+  Ethernet и WiFi 2 сменён на 1.1.1.1, 8.8.8.8 (было 192.168.1.1) — не помогло. Включить
+  зашифрованный DNS (DoH) без отката на порт 53 автоматический режим Claude не дал (изменение
+  системы) — нужен владелец, см. «Незакрыто».
 
 ### 2026-10-30 (13) — iPhone: тёмная полоса сверху, «плавающая» нижняя панель
 
@@ -407,6 +427,14 @@
 ---
 
 ## Незакрыто
+
+- **Tailscale Funnel (сессия 14):** чтобы Tailscale смог войти, в PowerShell от администратора:
+  `Set-DnsClientDohServerAddress -ServerAddress 8.8.8.8 -AllowFallbackToUdp $false -AutoUpgrade $true;
+  Add-DnsClientDohServerAddress -ServerAddress 1.1.1.1 -DohTemplate https://cloudflare-dns.com/dns-query
+  -AllowFallbackToUdp $false -AutoUpgrade $true; Restart-Service Tailscale` (или скрипт
+  `doh.ps1` из временной папки Claude). Затем войти в Tailscale (значок у часов → Log in), потом
+  `local-photo --tunnel funnel` и перезапуск облака. Вернуть DNS роутера:
+  `Set-DnsClientServerAddress -InterfaceAlias Ethernet,"WiFi 2" -ResetServerAddresses`.
 
 - Выкатка сессии 11 прошла (проверено `--status` после перезапуска).
 - Владельцу: открыть галерею на iPhone (Safari) — у HEIC должны появиться миниатюры, после этого
