@@ -35,7 +35,7 @@ function contentSnippet(section, key) {
 
 // ---------- own folders ----------
 
-/** Folder open in each section: null = everything. */
+/** Folder open in each section: null = the top. In Files a path, like "Работа/Отчёты". */
 const openFolder = { photos: null, files: null };
 
 /** First path part when it is an own folder, not a year of the date layout. */
@@ -44,11 +44,68 @@ function folderOf(item) {
   return item.path.includes('/') && !/^\d{4}$/.test(first) ? first : null;
 }
 
-/** The chips "Все · Папка · Папка · ＋" above the list. */
+/** The own folder a file lies in directly ("Работа/Отчёты"), or null in the date layout. */
+const dirOf = (item) => folderOf(item) && item.path.slice(0, item.path.lastIndexOf('/'));
+const leafName = (path) => path.slice(path.lastIndexOf('/') + 1);
+const parentOf = (path) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : null);
+const inFolder = (path, folder) => path.startsWith(`${folder}/`);
+
+/** Folders a section offers: Files has nested ones, Photos albums are top-level only. */
+function sectionFolders(section) {
+  const all = state.data[section]?.folders || [];
+  return section === 'files' ? all : all.filter((f) => !f.includes('/'));
+}
+
+/**
+ * What the list shows for the open folder. `below`: every file under it (for the summary);
+ * `items`: the files listed; `folders`: folder rows (Files only). In Files a folder shows its
+ * own files and subfolders, like a file manager; a search looks through everything below.
+ */
+function folderView(section, list, folder) {
+  if (section !== 'files') {
+    const below = folder ? list.items.filter((i) => folderOf(i) === folder) : list.items;
+    return { below, items: below, folders: [] };
+  }
+  const below = folder ? list.items.filter((i) => inFolder(i.path, folder)) : list.items;
+  const under = (list.folders || []).filter((f) => !folder || inFolder(f, folder));
+  const words = searchWords();
+  if (words.length) {
+    return { below, items: below, folders: under.filter((f) => words.every((w) => normalize(leafName(f)).includes(w))) };
+  }
+  const depth = folder ? folder.split('/').length + 1 : 1;
+  const direct = (path) => path.split('/').length === depth;
+  return { below, items: below.filter((i) => (folder ? direct(i.path) : !folderOf(i))), folders: under.filter(direct) };
+}
+
+/** Folder rows at the top of the Files list: a tap opens the folder, "⋯" renames or deletes it. */
+function renderFolderRows(paths, below, withParent) {
+  const box = el('div', { class: 'files folder-rows' });
+  for (const path of paths) {
+    const n = below.filter((i) => inFolder(i.path, path)).length;
+    const parent = withParent && parentOf(path);
+    box.append(el('div', { class: 'file-row folder-row', title: path, onclick: () => chooseFolder('files', path) },
+      el('div', { class: 'file-icon folder-icon' }, icon('folder')),
+      el('div', { class: 'file-main' },
+        el('div', { class: 'file-name', text: leafName(path) }),
+        el('div', { class: 'file-meta' },
+          el('span', { class: 'file-size', text: n ? `${n} ${plural(n, 'файл', 'файла', 'файлов')}` : t('пусто') }),
+          el('span', { class: 'file-date', text: parent || '' }))),
+      el('button', { class: 'btn round', title: t('Действия'), onclick: (e) => { e.stopPropagation(); folderActions('files', path); } }, icon('more'))));
+  }
+  return box;
+}
+
+/** Above the list: chips "Все · Альбом · ＋" in Photos, the path "Файлы › Работа › ＋" in Files. */
 function renderFolderBar(section, folders) {
   const bar = $('#folders');
-  if (!(section === 'photos' || section === 'files') || sel.on) { bar.hidden = true; return; }
-  if (openFolder[section] && !folders.includes(openFolder[section])) openFolder[section] = null;
+  if (!(section === 'photos' || section === 'files')) { bar.hidden = true; return; }
+  if (section === 'photos') folders = folders.filter((f) => !f.includes('/'));
+  // The open folder may be gone (renamed or deleted elsewhere): go to what is left of its path.
+  let open = openFolder[section];
+  while (open && !folders.includes(open)) open = section === 'files' ? parentOf(open) : null;
+  openFolder[section] = open;
+  if (sel.on) { bar.hidden = true; return; }
+  if (section === 'files') return renderCrumbs(bar);
   const chip = (label, folder, cls = '') => el('button', {
     class: `folder-chip ${cls} ${openFolder[section] === folder ? 'active' : ''}`, type: 'button',
     onclick: () => (folder !== null && openFolder[section] === folder ? folderActions(section, folder) : chooseFolder(section, folder)),
@@ -61,6 +118,23 @@ function renderFolderBar(section, folders) {
   bar.hidden = false;
 }
 
+/** Files: "Файлы › Работа › Отчёты" — a tap goes there; a tap on the open folder shows its actions. */
+function renderCrumbs(bar) {
+  const open = openFolder.files;
+  const parts = open ? open.split('/') : [];
+  const crumb = (label, path) => el('button', {
+    class: `folder-chip crumb ${path ? 'own' : ''} ${path === open ? 'active' : ''}`, type: 'button',
+    onclick: () => (path && path === open ? folderActions('files', path) : chooseFolder('files', path)),
+  }, label);
+  bar.replaceChildren(
+    crumb(t('Файлы'), null),
+    ...parts.flatMap((part, i) => [el('span', { class: 'crumb-sep', text: '›' }), crumb(part, parts.slice(0, i + 1).join('/'))]),
+    el('button', { class: 'folder-chip add', type: 'button', title: t('Новая папка'), onclick: () => createFolder('files') }, '+'),
+  );
+  bar.hidden = false;
+  bar.scrollLeft = bar.scrollWidth;   // a deep path keeps the open folder in view
+}
+
 function chooseFolder(section, folder) {
   openFolder[section] = folder;
   exitSelection();
@@ -68,36 +142,40 @@ function chooseFolder(section, folder) {
   render();
 }
 
+/** New folder; in Files inside the open one. Returns its path (null when cancelled). */
 async function createFolder(section, thenMove) {
   const name = await promptDialog(section === 'photos' ? t('Новый альбом') : t('Новая папка'), '', { ok: t('Создать') });
   if (!name) return null;
   try {
-    const res = await api.folderCreate(section, name);
+    const res = await api.folderCreate(section, name, section === 'files' ? openFolder.files : null);
     await load(section);
-    if (!thenMove) chooseFolder(section, res.name);
-    return res.name;
+    if (!thenMove) chooseFolder(section, res.path);
+    return res.path;
   } catch (e) {
     toast(tServer(e.message));
     return null;
   }
 }
 
-/** Tap on the open folder's chip: rename or delete it. */
+/** "⋯" of a folder, or a tap on the open one: rename or delete it. */
 function folderActions(section, folder) {
-  return actionSheet(folder, [
+  return actionSheet(leafName(folder), [
     { label: t('Переименовать'), run: async () => {
-      const name = await promptDialog(t('Переименовать папку'), folder);
-      if (!name || name === folder) return;
+      const name = await promptDialog(t('Переименовать папку'), leafName(folder));
+      if (!name || name === leafName(folder)) return;
       try {
         const res = await api.folderRename(section, folder, name);
-        openFolder[section] = res.name;
+        // The open folder may be this one or inside it.
+        const open = openFolder[section];
+        if (open === folder || (open && inFolder(open, folder))) openFolder[section] = res.path + open.slice(folder.length);
         await load(section);
       } catch (e) { toast(tServer(e.message)); }
     } },
     { label: t('Удалить папку'), destructive: true, hint: t('только пустую'), run: async () => {
       try {
         await api.folderDelete(section, folder);
-        openFolder[section] = null;
+        const open = openFolder[section];
+        if (open === folder || (open && inFolder(open, folder))) openFolder[section] = parentOf(folder);
         await load(section);
         toast(t('Папка удалена'));
       } catch (e) { toast(tServer(e.message)); }
@@ -107,12 +185,13 @@ function folderActions(section, folder) {
 
 /** "Переложить в папку…" for one item or the selection. */
 async function moveToFolder(section, items) {
-  const folders = state.data[section]?.folders || [];
-  const here = items.length === 1 ? folderOf(items[0]) : undefined;
+  const folders = sectionFolders(section);
+  const dir = section === 'files' ? dirOf : folderOf;
+  const here = items.length === 1 ? dir(items[0]) : undefined;
   let target;
   await actionSheet(t('Переложить в папку'), [
-    ...folders.filter((f) => f !== here).map((f) => ({ label: f, run: () => { target = f; } })),
-    { label: t('Новая папка…'), run: () => { target = createFolder(section, true); } },
+    ...folders.filter((f) => f !== here).map((f) => ({ label: f.replaceAll('/', ' › '), run: () => { target = f; } })),
+    { label: t('Новая папка…'), hint: section === 'files' && openFolder.files ? t('в «{f}»', { f: leafName(openFolder.files) }) : '', run: () => { target = createFolder(section, true); } },
     here !== null && { label: t('Убрать из папки'), hint: t('обратно в раздел по дате'), run: () => { target = ''; } },
   ]);
   // actionSheet runs the choice right after it closes.
@@ -125,7 +204,7 @@ async function moveToFolder(section, items) {
   }
   if (sel.on) exitSelection();
   await load(section);
-  toast(failed ? t('Не удалось переложить: {n}', { n: failed }) : target ? t('Переложено в «{f}»', { f: target }) : t('Убрано из папки'));
+  toast(failed ? t('Не удалось переложить: {n}', { n: failed }) : target ? t('Переложено в «{f}»', { f: leafName(target) }) : t('Убрано из папки'));
 }
 
 // ---------- share links ----------

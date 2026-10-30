@@ -72,6 +72,7 @@ struct Args {
     /// `Some(true)` = new key for automatic uploads, `Some(false)` = turn them off.
     upload_token: Option<bool>,
     lang: Option<String>,
+    new_login: bool,
 }
 
 fn on_off(value: Option<String>, flag: &str) -> Result<bool> {
@@ -105,6 +106,7 @@ local-photo — домашнее облако для фото и файлов
   --upload-token new  ключ для автозагрузки фото с iPhone («Быстрые команды»), см. README
   --upload-token off  выключить автозагрузку
   --lang ru|en        язык сообщений в Telegram и в консоли
+  --new-login         новые случайные логин и пароль — только в Telegram; все устройства выйдут
   --setup            выбрать папку хранилища, задать логин, пароль и Telegram заново
   --port <порт>       локальный порт (по умолчанию 8787)
   --no-tunnel         не открывать доступ из интернета (только http://127.0.0.1)
@@ -135,6 +137,7 @@ Usage: local-photo [options]
   --upload-token new  key for automatic uploads from an iPhone (Shortcuts), see README
   --upload-token off  turn automatic uploads off
   --lang ru|en        language of Telegram messages and the console
+  --new-login         a new random login and password, sent only to Telegram; all devices log out
   --setup             choose the storage folder, set the login, password and Telegram again
   --port <port>       local port (8787 by default)
   --no-tunnel         don't open access from the internet (only http://127.0.0.1)
@@ -146,7 +149,7 @@ fn parse_args() -> Result<Args> {
     let mut args = Args {
         dir: None, setup: false, no_tunnel: false, port: None, background: false, status: false, stop: false,
         autostart: None, terminal: None, runner: None, files: None, agent: None, two_factor: None, backup: None, backup_now: false, named_tunnel: None,
-        upload_token: None, lang: None,
+        upload_token: None, lang: None, new_login: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -154,6 +157,7 @@ fn parse_args() -> Result<Args> {
             "--dir" => args.dir = Some(it.next().context("после --dir нужна папка")?.into()),
             "--port" => args.port = Some(it.next().context("после --port нужен номер")?.parse().context("неверный порт")?),
             "--setup" => args.setup = true,
+            "--new-login" => args.new_login = true,
             "--no-tunnel" => args.no_tunnel = true,
             "--background" => args.background = true,
             "--status" => args.status = true,
@@ -315,6 +319,36 @@ fn set_two_factor(config: &mut Config, on: bool) -> Result<()> {
     bail!("вход по коду не включён: три неверных кода")
 }
 
+/// `--new-login`: a random login and password. They go only to the owner's Telegram chat —
+/// never to this console or the log — and every device is logged out. The cloud must be
+/// stopped first: it keeps the login and the open sessions in memory.
+async fn new_login(config_file: &Path, config_dir: &Path) -> Result<()> {
+    let mut config = Config::load(config_file)?.context("сначала настройте облако: запустите программу без параметров")?;
+    let tg = config.telegram.clone().context("Telegram не подключён — новый пароль некуда прислать. Подключите: local-photo --setup")?;
+    if service::running(config_dir).await.is_some() {
+        bail!("сначала остановите облако: local-photo --stop (потом снова --autostart on)");
+    }
+    let username = auth::random_hex(8);
+    let password = auth::random_hex(16);
+    let text = format!(
+        "🔐 {}\n\n{} <code>{username}</code>\n{} <code>{password}</code>\n\n{}",
+        i18n::tr("Новый вход в облако"),
+        i18n::tr("Логин:"),
+        i18n::tr("Пароль:"),
+        i18n::tr("Старые логин и пароль больше не действуют, все устройства вышли из облака. Сохраните новые в менеджере паролей и удалите это сообщение."),
+    );
+    // Sent before anything changes: if Telegram is unreachable, the old login keeps working.
+    telegram::send_message(&tg, &text, None, true).await.context("не удалось отправить в Telegram — логин и пароль не изменены")?;
+    config.username = username;
+    config.password_hash = config::hash_password(&password)?;
+    config.save(config_file)?;
+    let _ = std::fs::remove_file(config_dir.join("sessions.json"));
+    log!("Логин и пароль заменены на случайные (--new-login), все сеансы закрыты");
+    crate::say!("Новые логин и пароль отправлены в Telegram. Старые больше не действуют, все устройства вышли.");
+    crate::say!("Запустите облако: local-photo --autostart on");
+    Ok(())
+}
+
 fn set_backup(config: &mut Config, target: Option<&Path>) -> Result<()> {
     let Some(target) = target else {
         config.backup_dir = None;
@@ -416,6 +450,9 @@ async fn run() -> Result<()> {
         let stopped = service::stop(&config_dir).await?;
         crate::say!("{}", if stopped { "Облако остановлено." } else { "Облако не было запущено." });
         return Ok(());
+    }
+    if args.new_login {
+        return new_login(&config_file, &config_dir).await;
     }
     if let Some(on) = args.terminal {
         let mut config = Config::load(&config_file)?.context("сначала настройте облако: запустите программу без параметров")?;

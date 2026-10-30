@@ -17,6 +17,7 @@ const ICONS = {
   cloud: '<path d="M12 16V4m0 0-5 5m5-5 5 5M4 20h16"/>',
   more: '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>',
   note: '<path d="M6 3h9l4 4v14H6z"/><path d="M9 12h7M9 16h5"/>',
+  folder: '<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2.2h8.4A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/>',
 };
 
 // ---------- helpers ----------
@@ -396,7 +397,7 @@ const realApi = {
   trashFileUrl: (t) => `/api/trash/${t.id}/file`,
 
   search: (q) => request(`/api/search?${qs({ q })}`),
-  folderCreate: (section, name) => request('/api/folder', { method: 'POST', json: { section, name } }),
+  folderCreate: (section, name, parent) => request('/api/folder', { method: 'POST', json: { section, name, parent: parent || '' } }),
   folderRename: (section, name, newName) => request('/api/folder/rename', { method: 'POST', json: { section, name, new_name: newName } }),
   folderDelete: (section, name) => request(`/api/folder?${qs({ section, name })}`, { method: 'DELETE' }),
   move: (section, item, folder) => request(`/api/file/move?${qs({ section, path: item.path })}`, { method: 'POST', json: { folder } }),
@@ -643,7 +644,11 @@ const mockApi = (() => {
         ...data.files.filter((f) => f.text && has(f.text)).map((f) => ({ section: 'files', path: f.path, snippet: f.text.slice(0, 100) })),
       ] };
     },
-    async folderCreate(section, name) { (data.folders[section] ||= []).push(name); return { name }; },
+    async folderCreate(section, name, parent) {
+      const path = parent ? `${parent}/${name}` : name;
+      (data.folders[section] ||= []).push(path);
+      return { name, path };
+    },
     async folderRename() { throw new HttpError(0, t('В демо-режиме недоступно')); },
     async folderDelete() { throw new HttpError(0, t('В демо-режиме недоступно')); },
     async move(section, item, dest) {
@@ -986,14 +991,16 @@ function render() {
   if (!list) return;
   if (section === 'notes') return renderNotes(list);
   if (section === 'trash') return renderTrash(list);
-  const { total_size, disk_free } = list;
+  const { disk_free } = list;
+  renderFolderBar(section, list.folders || []);   // may step out of a folder that is gone
   const folder = openFolder[section];
-  renderFolderBar(section, list.folders || []);
-  const all = folder ? list.items.filter((i) => folderOf(i) === folder) : list.items;
-  const items = filterByQuery(all, (i) => i.name, section === 'files' ? (i) => contentSnippet('files', i.path) : null);
+  const view = folderView(section, list, folder);
+  const searching = searchWords().length > 0;
+  const items = filterByQuery(view.items, (i) => i.name, section === 'files' ? (i) => contentSnippet('files', i.path) : null);
   const content = $('#content');
 
-  const n = all.length;
+  const n = view.below.length;
+  const total_size = folder ? view.below.reduce((s, i) => s + i.size, 0) : list.total_size;
   $('#search-box').hidden = !list.items.length;
   const byAdded = sortOrder[section] === 'added';
   const action = $('#head-action');
@@ -1007,7 +1014,7 @@ function render() {
   // Uploads stop below 1 GB free (DISK_RESERVE on the server): warn well before that.
   $('#summary').classList.toggle('warn', disk_free != null && disk_free < 10 * 1024 ** 3);
 
-  if (!n) {
+  if (!n && !view.folders.length) {
     state.flat = [];
     content.replaceChildren(el('div', { class: 'empty' },
       icon(section === 'photos' ? 'image' : 'cloud'),
@@ -1017,8 +1024,8 @@ function render() {
         : t('Нажмите «+» или перетащите файлы в окно') })));
     return;
   }
-  if (items.length !== n) $('#summary').textContent = t('Найдено {0} из {1}', { 0: items.length, 1: n });
-  if (!items.length) {
+  if (searching) $('#summary').textContent = t('Найдено {0} из {1}', { 0: items.length + view.folders.length, 1: n });
+  if (!items.length && !view.folders.length) {
     state.flat = [];
     content.replaceChildren(nothingFound());
     return;
@@ -1026,14 +1033,19 @@ function render() {
 
   // A re-render while the viewer is open (upload finished, file deleted) must keep it on the same photo.
   const openPath = viewer.open && section === 'photos' ? state.viewer[state.index]?.path : null;
-  const groups = byAdded ? groupByAdded(items) : groupByMonth(items);
+  // Inside a Files folder its files are one plain list: the path above already says where.
+  const plain = section === 'files' && folder && !searching && !byAdded;
+  const groups = !items.length ? []
+    : plain ? [{ month: null, items: [...items].sort((a, b) => b.date - a.date) }]
+      : byAdded ? groupByAdded(items) : groupByMonth(items);
   state.flat = groups.flatMap((g) => g.items);   // display order, for range selection
   if (section === 'photos') state.viewer = state.flat;
   const frag = document.createDocumentFragment();
+  if (view.folders.length) frag.append(el('section', { class: 'month-block' }, renderFolderRows(view.folders, view.below, searching)));
   for (const g of groups) {
     // Header and items share a block so the sticky header stops at the end of its month.
     frag.append(el('section', { class: 'month-block' },
-      el('div', { class: 'month' },
+      g.month == null ? null : el('div', { class: 'month' },
         el('span', { class: 'month-chip glass' }, g.month + (g.year ? ` ${g.year}` : ''), el('span', { class: 'count', text: String(g.items.length) }))),
       section === 'photos' ? renderGrid(g.items) : renderFiles(g.items)));
   }

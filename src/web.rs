@@ -1374,26 +1374,43 @@ async fn search_content(State(app): State<App>, Query(q): Query<SearchQuery>) ->
 
 // ---------- the owner's own folders ----------
 
-/// Name of an existing own folder of `section`, from what the client sent.
+/// Path of an existing own folder of `section` ("Работа/Отчёты"), from what the client sent.
 fn own_folder(app: &AppState, section: Section, raw: &str) -> Option<String> {
-    storage::folder_name(raw).filter(|name| app.section_root(section).join(name).is_dir())
+    storage::own_folder(&app.section_root(section), raw)
+}
+
+/// "Работа/Отчёты" + "2024" → "Работа/Отчёты/2024"; at the top just the name.
+fn child_path(parent: Option<&str>, name: &str) -> String {
+    parent.map_or_else(|| name.to_string(), |p| format!("{p}/{name}"))
 }
 
 #[derive(Deserialize)]
 struct FolderBody {
     section: String,
+    /// The folder's path; for a new folder, its name.
     name: String,
-    /// For a rename: the new name.
+    /// For a rename: the new name (not a path).
     #[serde(default)]
     new_name: Option<String>,
+    /// For a new folder: the own folder it goes into (empty = the top of the section).
+    #[serde(default)]
+    parent: Option<String>,
 }
 
 async fn folder_create(State(app): State<App>, Json(body): Json<FolderBody>) -> Response {
     let Some(section) = Section::parse(&body.section) else { return error(StatusCode::BAD_REQUEST, "Неизвестный раздел") };
-    let Some(name) = storage::folder_name(&body.name) else {
+    let parent = match body.parent.as_deref().filter(|p| !p.is_empty()) {
+        Some(p) => match own_folder(&app, section, p) {
+            Some(p) => Some(p),
+            None => return error(StatusCode::NOT_FOUND, "Папка не найдена"),
+        },
+        None => None,
+    };
+    let Some(name) = storage::folder_name(&body.name, parent.is_none()) else {
         return error(StatusCode::BAD_REQUEST, "Такое имя папки нельзя: оно пустое или похоже на год");
     };
-    let dir = app.section_root(section).join(&name);
+    let path = child_path(parent.as_deref(), &name);
+    let dir = path.split('/').fold(app.section_root(section), |p, part| p.join(part));
     let _guard = app.place_lock.lock().await;
     if dir.exists() {
         return error(StatusCode::CONFLICT, "Папка с таким именем уже есть");
@@ -1401,26 +1418,30 @@ async fn folder_create(State(app): State<App>, Json(body): Json<FolderBody>) -> 
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Не удалось создать папку: {e}"));
     }
-    crate::log!("Создана папка {}/{name}", section.dir_name());
-    Json(json!({ "name": name })).into_response()
+    crate::log!("Создана папка {}/{path}", section.dir_name());
+    Json(json!({ "name": name, "path": path })).into_response()
 }
 
 async fn folder_rename(State(app): State<App>, Json(body): Json<FolderBody>) -> Response {
     let Some(section) = Section::parse(&body.section) else { return error(StatusCode::BAD_REQUEST, "Неизвестный раздел") };
     let Some(old) = own_folder(&app, section, &body.name) else { return error(StatusCode::NOT_FOUND, "Папка не найдена") };
-    let Some(new) = body.new_name.as_deref().and_then(storage::folder_name) else {
+    let parent = old.rsplit_once('/').map(|(p, _)| p.to_string());
+    let Some(name) = body.new_name.as_deref().and_then(|n| storage::folder_name(n, parent.is_none())) else {
         return error(StatusCode::BAD_REQUEST, "Такое имя папки нельзя: оно пустое или похоже на год");
     };
+    let new = child_path(parent.as_deref(), &name);
     let root = app.section_root(section);
+    let dir = |rel: &str| rel.split('/').fold(root.clone(), |p, part| p.join(part));
     let _guard = app.place_lock.lock().await;
-    if new != old && root.join(&new).exists() {
+    // Only a change of letter case is allowed onto an existing name (the same folder on Windows).
+    if new.to_lowercase() != old.to_lowercase() && dir(&new).exists() {
         return error(StatusCode::CONFLICT, "Папка с таким именем уже есть");
     }
-    if let Err(e) = std::fs::rename(root.join(&old), root.join(&new)) {
+    if let Err(e) = std::fs::rename(dir(&old), dir(&new)) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Не удалось переименовать: {e}"));
     }
     crate::log!("Папка {}/{old} → {new}", section.dir_name());
-    Json(json!({ "name": new })).into_response()
+    Json(json!({ "name": name, "path": new })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1433,7 +1454,7 @@ struct FolderQuery {
 async fn folder_delete(State(app): State<App>, Query(q): Query<FolderQuery>) -> Response {
     let Some(section) = Section::parse(&q.section) else { return error(StatusCode::BAD_REQUEST, "Неизвестный раздел") };
     let Some(name) = own_folder(&app, section, &q.name) else { return error(StatusCode::NOT_FOUND, "Папка не найдена") };
-    let dir = app.section_root(section).join(&name);
+    let dir = name.split('/').fold(app.section_root(section), |p, part| p.join(part));
     let _guard = app.place_lock.lock().await;
     if !storage::list(&dir).is_empty() {
         return error(StatusCode::CONFLICT, "В папке есть файлы: сначала переложите или удалите их");

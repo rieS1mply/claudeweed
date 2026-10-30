@@ -64,7 +64,7 @@ I18N.en = {
   'Переименовать папку': 'Rename folder', 'Удалить папку': 'Delete folder', 'только пустую': 'only if empty', 'Папка удалена': 'Folder deleted',
   'Новая папка…': 'New folder…', 'Убрать из папки': 'Take out of the folder', 'обратно в раздел по дате': 'back to the date view',
   'Переложить в папку': 'Move to folder', 'Не удалось переложить: {n}': 'Could not move: {n}', 'Переложено в «{f}»': 'Moved to “{f}”',
-  'Убрано из папки': 'Taken out of the folder', 'Папка пуста': 'The folder is empty',
+  'Убрано из папки': 'Taken out of the folder', 'Папка пуста': 'The folder is empty', 'пусто': 'empty', 'в «{f}»': 'in “{f}”',
   'Загрузите файлы сюда («+») или переложите: «⋯» у файла → «Переложить в папку»':
     'Upload files here (“+”) or move them: “⋯” next to a file → “Move to folder”',
 
