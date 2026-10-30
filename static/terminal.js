@@ -121,6 +121,35 @@ const panes = [];
 let layout = 1;
 let active = null;
 
+/** xterm 6 doesn't scroll by finger. A vertical swipe scrolls the history line by line; in
+ *  full-screen programs (less, vim) it becomes wheel events, which xterm passes on to them. */
+function swipeScroll(term) {
+  const screen = term.element.querySelector('.xterm-screen') || term.element;
+  let lastY = null;
+  term.element.addEventListener('touchstart', (e) => {
+    lastY = e.touches.length === 1 ? e.touches[0].clientY : null;
+  }, { passive: true });
+  term.element.addEventListener('touchmove', (e) => {
+    if (lastY === null || e.touches.length !== 1) return;
+    e.preventDefault();   // keep the page from bouncing under the finger
+    const { clientX, clientY } = e.touches[0];
+    const lineHeight = screen.clientHeight / term.rows || 16;
+    const lines = Math.trunc((lastY - clientY) / lineHeight);
+    if (!lines) return;
+    lastY -= lines * lineHeight;
+    if (term.buffer.active.type === 'normal') {
+      term.scrollLines(lines);
+      return;
+    }
+    for (let i = Math.abs(lines); i > 0; i--) {
+      screen.dispatchEvent(new WheelEvent('wheel', {
+        deltaY: Math.sign(lines), deltaMode: WheelEvent.DOM_DELTA_LINE, clientX, clientY, bubbles: true, cancelable: true,
+      }));
+    }
+  }, { passive: false });
+  term.element.addEventListener('touchend', () => { lastY = null; });
+}
+
 class Pane {
   constructor() {
     this.el = $('#pane-tpl').content.firstElementChild.cloneNode(true);
@@ -149,6 +178,7 @@ class Pane {
     for (const [k, v] of [['autocorrect', 'off'], ['autocapitalize', 'off'], ['autocomplete', 'off'], ['spellcheck', 'false']]) {
       this.term.textarea?.setAttribute(k, v);
     }
+    if (touch) swipeScroll(this.term);
     this.term.textarea?.addEventListener('focus', () => setActive(this));
     this.el.addEventListener('pointerdown', () => setActive(this));
     this.term.onData((data) => this.sendInput(withCtrl(data)));
