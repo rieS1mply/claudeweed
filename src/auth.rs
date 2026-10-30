@@ -152,12 +152,13 @@ fn session_cookie(headers: &HeaderMap) -> Option<&str> {
         .find_map(|pair| pair.trim().strip_prefix(COOKIE)?.strip_prefix('='))
 }
 
-/// Real visitor address. Behind the tunnel every request comes from 127.0.0.1,
-/// and Cloudflare puts the original address here (clients cannot forge it through Cloudflare).
+/// Real visitor address. Behind a tunnel every request comes from 127.0.0.1: Cloudflare puts
+/// the original address into CF-Connecting-IP, Tailscale Funnel into X-Forwarded-For (both
+/// overwrite what the visitor sent, so it can't be forged from outside).
 pub fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("cf-connecting-ip")
-        .and_then(|v| v.to_str().ok())
+    let header = |name| headers.get(name).and_then(|v| v.to_str().ok());
+    header("cf-connecting-ip")
+        .or_else(|| header("x-forwarded-for").and_then(|v| v.split(',').next()).map(str::trim).filter(|v| !v.is_empty()))
         .unwrap_or("local")
         .to_string()
 }
@@ -165,11 +166,14 @@ pub fn client_ip(headers: &HeaderMap) -> String {
 pub fn is_https(headers: &HeaderMap) -> bool {
     let header = |name| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("");
     header("x-forwarded-proto") == "https" || header("cf-visitor").contains("\"https\"")
+        // Funnel only exists as https://….ts.net.
+        || headers.contains_key("tailscale-funnel-request")
 }
 
-/// The request came from the internet through the Cloudflare tunnel (not from this computer).
-pub fn via_cloudflare(headers: &HeaderMap) -> bool {
-    headers.contains_key("cf-connecting-ip")
+/// The request came from the internet through a tunnel (Cloudflare or Tailscale Funnel),
+/// not from this computer. Both proxies add these headers to every request they pass on.
+pub fn via_tunnel(headers: &HeaderMap) -> bool {
+    ["cf-connecting-ip", "x-forwarded-for", "tailscale-funnel-request"].iter().any(|h| headers.contains_key(*h))
 }
 
 pub fn session_cookie_header(token: &str, secure: bool) -> String {

@@ -289,7 +289,8 @@ async fn require_session(State(app): State<App>, req: Request, next: Next) -> Re
 /// Through the tunnel, plain http:// would send the password unencrypted: redirect to https.
 async fn force_https(req: Request, next: Next) -> Response {
     let headers = req.headers();
-    if auth::via_cloudflare(headers) && !auth::is_https(headers) {
+    // Cloudflare also answers plain http://; Tailscale Funnel serves https only.
+    if headers.contains_key("cf-connecting-ip") && !auth::is_https(headers) {
         if let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) {
             let path = req.uri().path_and_query().map_or("/", |p| p.as_str());
             if let Ok(location) = HeaderValue::from_str(&format!("https://{host}{path}")) {
@@ -505,7 +506,7 @@ async fn login(State(app): State<App>, headers: HeaderMap, Json(body): Json<Logi
 /// this computer) and must not come through the tunnel.
 async fn local_stop(State(app): State<App>, headers: HeaderMap) -> Response {
     let secret = headers.get("x-local-secret").and_then(|v| v.to_str().ok()).unwrap_or("");
-    if auth::via_cloudflare(&headers) || secret.is_empty() || secret != app.local_secret {
+    if auth::via_tunnel(&headers) || secret.is_empty() || secret != app.local_secret {
         return error(StatusCode::FORBIDDEN, "Запрос отклонён");
     }
     crate::log!("Получена команда остановки");

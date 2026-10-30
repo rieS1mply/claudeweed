@@ -8,6 +8,7 @@ mod auth;
 mod backup;
 mod bot;
 mod config;
+mod funnel;
 mod i18n;
 mod lang_en;
 mod logging;
@@ -64,7 +65,8 @@ struct Args {
     backup: Option<Option<PathBuf>>,
     backup_now: bool,
     /// `Some(true)` = named tunnel (asked interactively), `Some(false)` = back to quick.
-    named_tunnel: Option<bool>,
+    /// "named", "funnel" or "quick".
+    named_tunnel: Option<&'static str>,
     /// `Some(true)` = new key for automatic uploads, `Some(false)` = turn them off.
     upload_token: Option<bool>,
     lang: Option<String>,
@@ -94,6 +96,7 @@ local-photo — домашнее облако для фото и файлов
   --backup <папка>    каждый день копировать хранилище в эту папку (лучше другой диск)
   --backup off        не делать резервную копию
   --backup-now        сделать резервную копию прямо сейчас
+  --tunnel funnel     постоянный адрес …ts.net через Tailscale Funnel (бесплатно, без домена)
   --tunnel named      постоянный адрес: туннель Cloudflare со своим доменом (спросит токен)
   --tunnel quick      снова случайный адрес trycloudflare.com (без аккаунта)
   --upload-token new  ключ для автозагрузки фото с iPhone («Быстрые команды»), см. README
@@ -122,6 +125,7 @@ Usage: local-photo [options]
   --backup <folder>   copy the storage to this folder every day (another disk is better)
   --backup off        no backup
   --backup-now        make a backup right now
+  --tunnel funnel     permanent …ts.net address through Tailscale Funnel (free, no domain)
   --tunnel named      permanent address: a Cloudflare tunnel on your domain (asks for the token)
   --tunnel quick      back to a random trycloudflare.com address (no account)
   --upload-token new  key for automatic uploads from an iPhone (Shortcuts), see README
@@ -162,9 +166,10 @@ fn parse_args() -> Result<Args> {
             "--backup-now" => args.backup_now = true,
             "--tunnel" => {
                 args.named_tunnel = Some(match it.next().as_deref() {
-                    Some("named") => true,
-                    Some("quick") => false,
-                    _ => bail!("после --tunnel нужно named или quick"),
+                    Some("named") => "named",
+                    Some("funnel") => "funnel",
+                    Some("quick") => "quick",
+                    _ => bail!("после --tunnel нужно funnel, named или quick"),
                 })
             }
             "--upload-token" => {
@@ -249,8 +254,9 @@ async fn print_status(config_dir: &Path) -> Result<()> {
     let two_factor = config.as_ref().is_some_and(|c| c.totp_secret.is_some());
     crate::say!("  Вход:        {}", if two_factor { "пароль + код из приложения" } else { "только пароль (--2fa on — добавить код)" });
     let address = match config.as_ref().and_then(|c| c.named_tunnel.as_ref()) {
+        _ if config.as_ref().is_some_and(|c| c.funnel.is_some()) => format!("постоянный (Tailscale), {}", config.as_ref().and_then(|c| c.funnel.clone()).unwrap_or_default()),
         Some(t) => format!("постоянный, {}", t.url),
-        None => "случайный trycloudflare.com (--tunnel named — постоянный)".into(),
+        None => "случайный trycloudflare.com (--tunnel funnel — постоянный)".into(),
     };
     crate::say!("  Адрес:       {address}");
     match config.as_ref().and_then(|c| c.backup_dir.as_ref()) {
@@ -326,12 +332,31 @@ fn set_backup(config: &mut Config, target: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+/// `--tunnel funnel`: checks Tailscale, publishes the port right away and keeps the address.
+async fn set_funnel(config: &mut Config) -> Result<()> {
+    if funnel::bin().is_none() {
+        bail!("Tailscale не установлен. Установите: https://tailscale.com/download (или winget install Tailscale.Tailscale), войдите в аккаунт и повторите");
+    }
+    let name = funnel::dns_name().await?;
+    crate::say!("Публикую облако через Tailscale Funnel…");
+    funnel::publish(config.port).await?;
+    let url = format!("https://{name}");
+    config.funnel = Some(url.clone());
+    config.named_tunnel = None;
+    crate::say!("Постоянный адрес: {url}");
+    crate::say!("Перезапустите облако (--stop, затем --autostart on): адрес больше не будет меняться.");
+    crate::say!("Первое открытие может занять до минуты, пока Tailscale получает сертификат.");
+    Ok(())
+}
+
 fn set_tunnel(config: &mut Config, named: bool) -> Result<()> {
     if !named {
         config.named_tunnel = None;
+        config.funnel = None;
         crate::say!("Снова случайный адрес trycloudflare.com. Перезапустите облако: --stop, затем --autostart on");
         return Ok(());
     }
+    config.funnel = None;
     crate::say!("Постоянный адрес — туннель Cloudflare на вашем домене (домен должен быть добавлен в Cloudflare).");
     crate::say!("1. https://one.dash.cloudflare.com → Networks → Tunnels → Create a tunnel → Cloudflared.");
     crate::say!("2. Скопируйте токен из команды установки (длинная строка после --token или «eyJ…»).");
@@ -446,6 +471,7 @@ async fn run() -> Result<()> {
                 let token = auth::random_hex(20);
                 config.upload_token = Some(web::upload_token_hash(&token));
                 let url = service::running(&config_dir).await.and_then(|st| st.url)
+                    .or_else(|| config.funnel.clone())
                     .or_else(|| config.named_tunnel.as_ref().map(|t| t.url.clone()))
                     .unwrap_or_else(|| "https://<адрес облака>".into());
                 crate::say!("Ключ автозагрузки (показывается один раз, старый ключ больше не действует):");
@@ -457,7 +483,7 @@ async fn run() -> Result<()> {
                 crate::say!("   Метод:     POST, тело запроса — Файл");
                 crate::say!("   Заголовок: Authorization = Bearer {token}");
                 crate::say!("Пошагово — в README, раздел «Автозагрузка с iPhone».");
-                if config.named_tunnel.is_none() {
+                if config.named_tunnel.is_none() && config.funnel.is_none() {
                     crate::say!("Внимание: адрес trycloudflare меняется при каждом перезапуске облака — его придётся");
                     crate::say!("исправлять в команде. Постоянный адрес: local-photo --tunnel named");
                 }
@@ -480,8 +506,15 @@ async fn run() -> Result<()> {
         if let Some(target) = &args.backup {
             set_backup(&mut config, target.as_deref())?;
         }
-        if let Some(named) = args.named_tunnel {
-            set_tunnel(&mut config, named)?;
+        match args.named_tunnel {
+            Some("funnel") => set_funnel(&mut config).await?,
+            Some(choice) => {
+                if config.funnel.is_some() {
+                    funnel::unpublish().await;
+                }
+                set_tunnel(&mut config, choice == "named")?;
+            }
+            None => {}
         }
         config.save(&config_file)?;
         if args.backup_now {
@@ -639,7 +672,31 @@ async fn run() -> Result<()> {
         let public_url = public_url.clone();
         let (status, config_dir) = (status.clone(), config_dir.clone());
         let background = args.background;
+        let funnel_url = config.funnel.clone();
+        let announce = move |url: String| {
+            *public_url.lock().unwrap() = Some(url.clone());
+            {
+                let mut st = status.lock().unwrap();
+                st.url = Some(url.clone());
+                service::write_status(&config_dir, &st);
+            }
+            log!("Облако доступно по адресу: {url}");
+            if !background {
+                show_url(&url);
+            }
+            if let Some(tg) = telegram.clone() {
+                tokio::spawn(async move {
+                    telegram::send_with_retry(&tg, &format!("Облако запущено:\n{url}")).await;
+                });
+            }
+        };
         Some(tokio::spawn(async move {
+            // Tailscale Funnel: tailscaled itself carries the traffic, no cloudflared needed.
+            if let Some(url) = funnel_url {
+                log!("Публикую облако через Tailscale Funnel…");
+                funnel::run(port, url, announce).await;
+                return;
+            }
             let bin = match tunnel::ensure_cloudflared(&bin_dir).await {
                 Ok(b) => b,
                 Err(e) => {
@@ -648,24 +705,7 @@ async fn run() -> Result<()> {
                 }
             };
             log!("Открываю туннель Cloudflare…");
-            tunnel::run(bin, port, tunnel_mode, move |url| {
-                *public_url.lock().unwrap() = Some(url.clone());
-                {
-                    let mut st = status.lock().unwrap();
-                    st.url = Some(url.clone());
-                    service::write_status(&config_dir, &st);
-                }
-                log!("Облако доступно по адресу: {url}");
-                if !background {
-                    show_url(&url);
-                }
-                if let Some(tg) = telegram.clone() {
-                    tokio::spawn(async move {
-                        telegram::send_with_retry(&tg, &format!("Облако запущено:\n{url}")).await;
-                    });
-                }
-            })
-            .await;
+            tunnel::run(bin, port, tunnel_mode, announce).await;
         }))
     };
 

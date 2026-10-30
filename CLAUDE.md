@@ -89,6 +89,7 @@ local-photo.exe), `--stop` убьёт и терминал, и самого Claud
 | `src/trash.rs`, `src/notes.rs`, `src/zips.rs`, `src/thumbs.rs` | корзина 30 дней, заметки, ZIP, превью (`store_preview` — JPEG для HEIC, присланный браузером) |
 | `src/search.rs` | поиск по тексту заметок и текстовых файлов (`/api/search`) |
 | `src/shares.rs` | ссылки без пароля: `shares.json` в папке настроек; публичные маршруты `/s/{token}`, `/api/s/{token}/…` в `web.rs` (вне `protected`) |
+| `src/funnel.rs` | постоянный адрес через Tailscale Funnel (`--tunnel funnel`, `config.funnel` = https://…ts.net): `tailscale funnel --bg` раз в 10 мин, без cloudflared. Запросы через Funnel приходят с 127.0.0.1 с `X-Forwarded-For` — `auth::via_tunnel`/`client_ip` их учитывают |
 | `src/i18n.rs`, `src/lang_en.rs` | язык консоли/Telegram (`--lang`), `say!`, `tr()` |
 | свои папки | `storage::folders`/`folder_name` (папки верхнего уровня, кроме годов), `/api/folder`, `/api/file/move`; `prune_empty_dirs` их не удаляет |
 | автозагрузка | `POST /api/auto-upload` с `Authorization: Bearer` (ключ `--upload-token new`, в конфиге SHA-256), вне `protected`; повтор (имя+размер в месяце) пропускается |
