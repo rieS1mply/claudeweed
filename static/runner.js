@@ -453,7 +453,8 @@ int main() {
   std::cout << "2 + 3 = " << 2 + 3 << "\\n";
 }
 `,
-  csharp: `Console.WriteLine("Привет из облака!");
+  csharp: `Console.InputEncoding = System.Text.Encoding.UTF8;   // кириллица из поля «Ввод»
+Console.WriteLine("Привет из облака!");
 var line = Console.ReadLine() ?? "";
 Console.WriteLine("Ввод: " + line);
 Console.WriteLine("2 + 3 = " + (2 + 3));

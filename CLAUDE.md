@@ -89,7 +89,7 @@ local-photo.exe), `--stop` убьёт и терминал, и самого Claud
 | `src/terminal.rs` | до 8 именованных PTY-сеансов (ConPTY на Windows), история, deflate-сжатие вывода; REST `/api/terminal/sessions` + WebSocket `/api/terminal?id=N` |
 | `src/terminal_store.rs` | сеансы переживают перезапуск: раз в 15 с пишутся в `<настройки>/terminal/` (имя, папка, вывод, запущенный Claude); при старте оболочки возвращаются, в них вводится `claude --resume <id>`. Папку PowerShell сообщает своим приглашением (OSC 7). Убирает переменные `CLAUDE_CODE_*` из окружения оболочек |
 | шпаргалка команд | `static/commands.json` — один список для `cmds` в оболочке (`src/cmds.ps1`, входит в `-EncodedCommand`, список — файл `LP_CMDS` из `terminal_store::commands_file`) и для кнопки «?» на странице терминала. Новая команда — строка в JSON (поля g, ge, cmd, ru, en) |
-| `src/runner.rs` | запуск кода (как онлайн-компилятор): таблица `LANGS`, поиск инструментов `which`, лимиты, NDJSON-поток `/api/run`, `/api/run/langs` |
+| `src/runner.rs` | запуск кода (как онлайн-компилятор): таблица `LANGS`, поиск инструментов `which`/`which_all` (PATH на Windows — свежий из реестра, `tool_path`; проверяются все копии программы, запоминается ответившая), лимиты, NDJSON-поток `/api/run`, `/api/run/langs` |
 | `src/trash.rs`, `src/notes.rs`, `src/zips.rs`, `src/thumbs.rs` | корзина 30 дней, заметки, ZIP, превью (`store_preview` — JPEG для HEIC, присланный браузером) |
 | `src/search.rs` | поиск по тексту заметок и текстовых файлов (`/api/search`) |
 | `src/shares.rs` | ссылки без пароля: `shares.json` в папке настроек; публичные маршруты `/s/{token}`, `/api/s/{token}/…` в `web.rs` (вне `protected`) |

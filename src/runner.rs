@@ -148,8 +148,9 @@ pub struct LangInfo {
     /// First line of the tool's version, when found.
     pub version: Option<String>,
     pub hint: &'static str,
+    /// Which toolchain works, and the program that answered for it.
     #[serde(skip)]
-    toolchain: Option<usize>,
+    toolchain: Option<(usize, PathBuf)>,
 }
 
 /// What the page receives, one JSON object per line.
@@ -192,14 +193,15 @@ impl Runner {
         // All at once: a missing tool can take seconds to fail, and there are a dozen of them.
         let list = futures_util::future::join_all(LANGS.iter().map(|lang| async move {
             let mut info = LangInfo { id: lang.id, name: lang.name, file: lang.file, available: false, version: None, hint: lang.hint, toolchain: None };
-            for (i, tc) in lang.toolchains.iter().enumerate() {
-                if let Some(version) = probe(tc).await {
+            'found: for (i, tc) in lang.toolchains.iter().enumerate() {
+                for program in which_all(tc.tool) {
+                    let Some(version) = probe(&program, tc).await else { continue };
                     if lang.id == "csharp" && !dotnet_runs_files(&version) {
                         info.version = Some(format!("{version} — нужен .NET 10"));
-                        break;
+                        continue;
                     }
-                    (info.available, info.version, info.toolchain) = (true, Some(version), Some(i));
-                    break;
+                    (info.available, info.version, info.toolchain) = (true, Some(version), Some((i, program)));
+                    break 'found;
                 }
             }
             info
@@ -224,7 +226,7 @@ impl Runner {
             let _ = tx.send(exit(None, Some("error"))).await;
             return;
         };
-        let Some(tc) = info.toolchain.map(|i| &lang.toolchains[i]) else {
+        let Some((tc, tool)) = info.toolchain.as_ref().map(|(i, program)| (&lang.toolchains[*i], program.as_path())) else {
             let _ = tx.send(Event::Err { v: format!("{} не найден на компьютере. {}\n", lang.name, lang.hint) }).await;
             let _ = tx.send(exit(None, Some("error"))).await;
             return;
@@ -248,13 +250,13 @@ impl Runner {
             let mut budget = MAX_OUTPUT;
             if let Some(compile) = tc.compile {
                 let _ = tx.send(Event::Phase { v: "compile" }).await;
-                let step = step(&argv(compile, tc, lang, &exe), &dir, None, COMPILE_TIMEOUT, &tx, &mut budget).await;
+                let step = step(&argv(compile, tool, lang, &exe), &dir, None, COMPILE_TIMEOUT, &tx, &mut budget).await;
                 if step.reason.is_some() || step.code != Some(0) {
                     return Ok((step.code, Some(step.reason.unwrap_or("compile"))));
                 }
             }
             let _ = tx.send(Event::Phase { v: "run" }).await;
-            let step = step(&argv(tc.run, tc, lang, &exe), &dir, Some(stdin.as_bytes().to_vec()), RUN_TIMEOUT, &tx, &mut budget).await;
+            let step = step(&argv(tc.run, tool, lang, &exe), &dir, Some(stdin.as_bytes().to_vec()), RUN_TIMEOUT, &tx, &mut budget).await;
             Ok((step.code, step.reason))
         }
         .await;
@@ -280,10 +282,10 @@ fn dotnet_runs_files(version: &str) -> bool {
     version.split('.').next().and_then(|m| m.trim().parse::<u32>().ok()).is_some_and(|major| major >= 10)
 }
 
-fn argv(template: &[&str], tc: &Toolchain, lang: &Lang, exe: &Path) -> Vec<String> {
+fn argv(template: &[&str], tool: &Path, lang: &Lang, exe: &Path) -> Vec<String> {
     template
         .iter()
-        .map(|a| a.replace("{tool}", tc.tool).replace("{src}", lang.file).replace("{exe}", &exe.to_string_lossy()))
+        .map(|a| a.replace("{tool}", &tool.to_string_lossy()).replace("{src}", lang.file).replace("{exe}", &exe.to_string_lossy()))
         .collect()
 }
 
@@ -298,36 +300,41 @@ fn work_dir() -> std::io::Result<PathBuf> {
 /// one, and the Microsoft Store python.exe is an "app execution alias" that file checks
 /// can't open (it is found by listing its folder instead).
 pub(crate) fn which(program: &str) -> Option<PathBuf> {
+    which_all(program).into_iter().next()
+}
+
+/// Every copy of a program in PATH, in PATH order. The first one isn't always usable: a .NET
+/// runtime in Program Files hides a user-installed SDK, for example.
+fn which_all(program: &str) -> Vec<PathBuf> {
     let path = Path::new(program);
     if path.is_absolute() {
-        return Some(path.to_path_buf());
+        return vec![path.to_path_buf()];
     }
     // Git for Windows keeps bash next to git: …\Git\cmd\git.exe → …\Git\bin\bash.exe.
     if program == GIT_BASH {
-        if !cfg!(windows) {
-            return None;
-        }
-        let bash = which("git")?.parent()?.parent()?.join("bin").join("bash.exe");
-        return bash.is_file().then_some(bash);
+        let bash = cfg!(windows).then(|| which("git")).flatten().and_then(|git| Some(git.parent()?.parent()?.join("bin").join("bash.exe")));
+        return bash.into_iter().filter(|b| b.is_file()).collect();
     }
-    let path_var = tool_path()?;
+    let Some(path_var) = tool_path() else { return Vec::new() };
     let path_var = path_var.to_string_lossy();
     let dirs = path_var.split(if cfg!(windows) { ';' } else { ':' }).map(|d| d.trim().trim_matches('"')).filter(|d| !d.is_empty());
+    let mut found = Vec::new();
     if cfg!(windows) {
         let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
         let names: Vec<String> = pathext.split(';').filter(|e| !e.is_empty()).map(|e| format!("{program}{e}").to_lowercase()).collect();
         for dir in dirs {
             let Ok(entries) = std::fs::read_dir(dir) else { continue };
-            let found: Vec<String> = entries.flatten().map(|e| e.file_name().to_string_lossy().to_lowercase()).filter(|n| names.contains(n)).collect();
+            let here: Vec<String> = entries.flatten().map(|e| e.file_name().to_string_lossy().to_lowercase()).filter(|n| names.contains(n)).collect();
             // In PATHEXT order, as cmd.exe does: python.exe before python.bat.
-            if let Some(name) = names.iter().find(|n| found.contains(n)) {
-                return Some(Path::new(dir).join(name));
+            if let Some(name) = names.iter().find(|n| here.contains(n)) {
+                found.push(Path::new(dir).join(name));
             }
         }
-        None
     } else {
-        dirs.map(|d| Path::new(d).join(program)).find(|p| p.is_file())
+        found.extend(dirs.map(|d| Path::new(d).join(program)).filter(|p| p.is_file()));
     }
+    found.dedup();
+    found
 }
 
 /// PATH for finding and starting tools. On Windows it is read anew from the registry (machine
@@ -361,8 +368,8 @@ fn command(argv: &[String], dir: &Path) -> Command {
 }
 
 /// First line of `--version` (stderr for java), if the tool runs.
-async fn probe(tc: &Toolchain) -> Option<String> {
-    let mut args = vec![tc.tool.to_string()];
+async fn probe(program: &Path, tc: &Toolchain) -> Option<String> {
+    let mut args = vec![program.to_string_lossy().into_owned()];
     args.extend(tc.probe.iter().map(|s| s.to_string()));
     let mut cmd = command(&args, &std::env::temp_dir());
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
