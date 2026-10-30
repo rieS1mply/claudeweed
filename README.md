@@ -150,7 +150,10 @@ Authenticator, 2FAS, Aegis или любом другом приложении �
 
 - Языки — те, что установлены на компьютере: Python, JavaScript и TypeScript (Node.js), C и C++
   (gcc/clang), C# (.NET 10), Java (11+), Go, Rust, PHP, Ruby, Lua, PowerShell, Bash. Чего нет —
-  показано серым с подсказкой, что поставить; после установки — «Обновить список».
+  показано серым с подсказкой, что поставить; после установки — «Обновить список» (на Windows
+  облако читает PATH из реестра, перезапуск не нужен). Bash на Windows — из Git for Windows.
+  Всё разом на Windows: `winget install OpenJS.NodeJS.LTS BrechtSanders.WinLibs.POSIX.UCRT
+  Microsoft.DotNet.SDK.10 GoLang.Go PHP.PHP.8.4 RubyInstallerTeam.Ruby.3.4 DEVCOM.Lua`.
 - Вывод появляется по мере печати, ошибки — красным; поле **Ввод** — то, что программа прочитает
   со стандартного ввода. **Стоп** останавливает программу и всё, что она запустила.
 - Ограничения: компиляция до 60 с, работа до 15 с, вывод до 1 МБ, не больше двух запусков сразу.

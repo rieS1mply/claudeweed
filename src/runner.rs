@@ -122,9 +122,16 @@ const LANGS: &[Lang] = &[
     },
     Lang {
         id: "bash", name: "Bash", file: "main.sh", bom: false, hint: "На Windows: Git Bash или WSL",
-        toolchains: &[Toolchain { tool: "bash", probe: V, compile: None, run: &["{tool}", "{src}"] }],
+        // Git Bash first: on Windows "bash" is usually the WSL launcher, which can't take a Windows path.
+        toolchains: &[
+            Toolchain { tool: GIT_BASH, probe: V, compile: None, run: &["{tool}", "{src}"] },
+            Toolchain { tool: "bash", probe: V, compile: None, run: &["{tool}", "{src}"] },
+        ],
     },
 ];
+
+/// Stands for the bash of Git for Windows in [`which`].
+const GIT_BASH: &str = "git-bash";
 
 /// Output as UTF-8 whatever the console code page, then the script itself.
 const PS_RUN: &[&str] = &[
@@ -295,7 +302,15 @@ pub(crate) fn which(program: &str) -> Option<PathBuf> {
     if path.is_absolute() {
         return Some(path.to_path_buf());
     }
-    let path_var = std::env::var_os("PATH")?;
+    // Git for Windows keeps bash next to git: …\Git\cmd\git.exe → …\Git\bin\bash.exe.
+    if program == GIT_BASH {
+        if !cfg!(windows) {
+            return None;
+        }
+        let bash = which("git")?.parent()?.parent()?.join("bin").join("bash.exe");
+        return bash.is_file().then_some(bash);
+    }
+    let path_var = tool_path()?;
     let path_var = path_var.to_string_lossy();
     let dirs = path_var.split(if cfg!(windows) { ';' } else { ':' }).map(|d| d.trim().trim_matches('"')).filter(|d| !d.is_empty());
     if cfg!(windows) {
@@ -315,9 +330,19 @@ pub(crate) fn which(program: &str) -> Option<PathBuf> {
     }
 }
 
+/// PATH for finding and starting tools. On Windows it is read anew from the registry (machine
+/// and user parts), as a newly opened console and the web terminal see it: a compiler installed
+/// after the cloud started is found without a restart. Elsewhere it is the cloud's own PATH.
+pub(crate) fn tool_path() -> Option<std::ffi::OsString> {
+    portable_pty::CommandBuilder::new("").get_env("PATH").map(std::ffi::OsStr::to_os_string)
+}
+
 fn command(argv: &[String], dir: &Path) -> Command {
     let program = which(&argv[0]).unwrap_or_else(|| PathBuf::from(&argv[0]));
     let mut cmd = Command::new(program);
+    if let Some(path) = tool_path() {
+        cmd.env("PATH", path);
+    }
     cmd.args(&argv[1..])
         .current_dir(dir)
         .env("PYTHONUTF8", "1")

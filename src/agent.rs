@@ -260,6 +260,10 @@ impl Agent {
             cmd.args(["--resume", id]);
         }
         cmd.current_dir(&cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        // Tools installed after the cloud started (compilers, node) are on Claude's PATH too.
+        if let Some(path) = crate::runner::tool_path() {
+            cmd.env("PATH", path);
+        }
         // A cloud rolled out by an agent inherits its variables; Claude would think it is a sub-agent.
         for var in crate::terminal_store::inherited_agent_vars() {
             cmd.env_remove(var);
