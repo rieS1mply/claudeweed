@@ -55,6 +55,10 @@ pub struct AppState {
     shares: shares::Shares,
     /// «Компьютер» (`--files on`): the whole computer, like Finder.
     pc: pc::Pc,
+    /// Login requests waiting for the owner's answer in Telegram.
+    pub tg_logins: crate::access::TgLogins,
+    /// Photo descriptions for search ("собака", "чек"), made by a local model.
+    pub vision: Arc<crate::vision::Vision>,
 }
 
 struct Upload {
@@ -74,6 +78,7 @@ pub type App = Arc<AppState>;
 impl AppState {
     pub fn new(paths: Paths, config: Config, auth: Auth, local_secret: String, stop: Arc<tokio::sync::Notify>) -> App {
         let shares_file = paths.config.with_file_name("shares.json");
+        let vision_file = paths.config.with_file_name("vision.json");
         // Password hash, bot token, sessions; thumbnails and the cloud's trash.
         let closed: Vec<PathBuf> = paths.config.parent().map(PathBuf::from).into_iter().chain([paths.storage.join(crate::config::SYSTEM_DIR)]).collect();
         Arc::new(AppState {
@@ -91,6 +96,8 @@ impl AppState {
             terminal: Default::default(),
             runner: Default::default(),
             totp_last_step: Default::default(),
+            tg_logins: Default::default(),
+            vision: Arc::new(crate::vision::Vision::load(&vision_file)),
         })
     }
 
@@ -112,7 +119,7 @@ impl AppState {
     }
 
     /// Also read live: `--2fa on` takes effect for the next login without a restart.
-    fn totp_secret(&self) -> Option<String> {
+    pub(crate) fn totp_secret(&self) -> Option<String> {
         Config::load(&self.paths.config).ok().flatten().map_or_else(|| self.config.totp_secret.clone(), |c| c.totp_secret)
     }
 
@@ -182,11 +189,17 @@ pub fn router(app: App) -> Router {
         .route("/api/pc/zip", post(pc_zip))
         .route("/api/pc/jobs/{id}", get(pc_job).delete(pc_job_cancel))
         .route("/api/pc/upload", put(pc_upload).layer(DefaultBodyLimit::max(MAX_CHUNK)))
+        .route("/api/sessions", get(crate::access::sessions_list))
+        .route("/api/sessions/others", post(crate::access::sessions_end_others))
+        .route("/api/sessions/{id}", axum::routing::delete(crate::access::session_end))
+        .route("/api/vision", get(vision_status))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_session));
 
     Router::new()
         .route("/api/session", get(session))
         .route("/api/login", post(login))
+        .route("/api/login/telegram", post(crate::access::tg_login_start))
+        .route("/api/login/telegram/{id}", get(crate::access::tg_login_poll))
         .route("/api/local/stop", post(local_stop))
         // Open without the password: the long random link (or upload key) is the permission.
         .route("/s/{token}", get(share_page))
@@ -273,7 +286,7 @@ pub fn spawn_upload_janitor(app: App) {
 
 // ---------- helpers ----------
 
-fn error(status: StatusCode, msg: &str) -> Response {
+pub(crate) fn error(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
 
@@ -283,7 +296,7 @@ fn not_found() -> Response {
 
 /// Mutating requests must come from our own page: a custom header (forces a CORS
 /// preflight that we never answer) plus a matching Origin when the browser sends one.
-fn csrf_ok(headers: &HeaderMap) -> bool {
+pub(crate) fn csrf_ok(headers: &HeaderMap) -> bool {
     if headers.get("x-cloud").and_then(|v| v.to_str().ok()) != Some("1") {
         return false;
     }
@@ -455,7 +468,11 @@ fn asset_response(name: &str, headers: &HeaderMap) -> Response {
 
 async fn session(State(app): State<App>, headers: HeaderMap) -> Response {
     let authenticated = app.auth.is_valid(&headers);
-    Json(json!({ "authenticated": authenticated, "terminal": authenticated && app.terminal_enabled(), "runner": authenticated && app.runner_enabled(), "files": authenticated && app.files_enabled() })).into_response()
+    Json(json!({
+        "authenticated": authenticated, "terminal": authenticated && app.terminal_enabled(), "runner": authenticated && app.runner_enabled(),
+        "files": authenticated && app.files_enabled(), "telegram_login": crate::access::tg_login_available(&app),
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -488,8 +505,13 @@ async fn login(State(app): State<App>, headers: HeaderMap, Json(body): Json<Logi
     .unwrap_or(false);
     let user_ok = body.username == app.config.username;
 
+    let agent = auth::short_agent(&headers);
     if !(user_ok && password_ok) {
         app.auth.record_failure(&ip);
+        app.auth.record_login(&ip, &agent, "password", false);
+        if app.auth.check_allowed(&ip).is_err() {
+            crate::access::notify_lockout(&app, &ip);
+        }
         crate::log!("Неудачная попытка входа (адрес: {ip})");
         tokio::time::sleep(Duration::from_millis(500)).await;
         return error(StatusCode::UNAUTHORIZED, "Неверный логин или пароль");
@@ -512,6 +534,7 @@ async fn login(State(app): State<App>, headers: HeaderMap, Json(body): Json<Logi
         if accepted.is_none() {
             // Counts like a wrong password, so codes can't be guessed either.
             app.auth.record_failure(&ip);
+            app.auth.record_login(&ip, &agent, "password", false);
             crate::log!("Неверный код второго фактора (адрес: {ip})");
             tokio::time::sleep(Duration::from_millis(500)).await;
             return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "Неверный или устаревший код", "need_code": true }))).into_response();
@@ -519,10 +542,18 @@ async fn login(State(app): State<App>, headers: HeaderMap, Json(body): Json<Logi
     }
 
     app.auth.record_success(&ip);
+    app.auth.record_login(&ip, &agent, "password", true);
     crate::log!("Вход выполнен (адрес: {ip})");
-    let token = app.auth.create_session();
+    let token = app.auth.create_session(&ip, &agent, "password");
+    crate::access::notify_login(&app, &token, &ip, &agent);
     let cookie = auth::session_cookie_header(&token, auth::is_https(&headers));
     ([(header::SET_COOKIE, cookie)], Json(json!({ "ok": true }))).into_response()
+}
+
+/// Photo search by content: on or off, how far the descriptions got, what stops them.
+async fn vision_status(State(app): State<App>) -> Response {
+    let model = crate::vision::model(&app.paths.config);
+    Json(json!({ "enabled": model.is_some(), "model": model, "described": app.vision.described(), "problem": app.vision.problem() })).into_response()
 }
 
 /// `local-photo --stop`. Needs the secret from status.json (readable only by this user on
@@ -742,7 +773,13 @@ async fn list(State(app): State<App>, Query(q): Query<ListQuery>) -> Response {
         return error(StatusCode::BAD_REQUEST, "Неизвестный раздел");
     };
     let root = app.section_root(section);
-    let (items, folders) = tokio::task::spawn_blocking(move || (storage::list(&root), storage::folders(&root))).await.unwrap_or_default();
+    let (mut items, folders) = tokio::task::spawn_blocking(move || (storage::list(&root), storage::folders(&root))).await.unwrap_or_default();
+    if section == Section::Photos {
+        let descriptions = app.vision.descriptions();
+        for item in &mut items {
+            item.desc = descriptions.get(&item.path).cloned();
+        }
+    }
     let total: u64 = items.iter().map(|i| i.size).sum();
     let free = fs4::available_space(&app.paths.storage).ok();
     Json(json!({ "items": items, "folders": folders, "total_size": total, "disk_free": free })).into_response()

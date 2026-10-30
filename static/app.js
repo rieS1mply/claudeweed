@@ -352,6 +352,11 @@ function putChunk(url, blob, onProgress) {
 const realApi = {
   session: () => request('/api/session', { allow401: true }),
   login: (username, password, code) => request('/api/login', { method: 'POST', json: { username, password, code }, allow401: true }),
+  tgLoginStart: () => request('/api/login/telegram', { method: 'POST', allow401: true }),
+  tgLoginPoll: (id) => request(`/api/login/telegram/${encodeURIComponent(id)}`, { allow401: true }),
+  sessions: () => request('/api/sessions'),
+  sessionEnd: (id) => request(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  sessionsEndOthers: () => request('/api/sessions/others', { method: 'POST' }),
   logout: () => request('/api/logout', { method: 'POST' }),
   list: (section) => request(`/api/list?${qs({ section })}`),
   remove: (section, item) => request(`/api/file?${qs({ section, path: item.path })}`, { method: 'DELETE' }),
@@ -552,6 +557,13 @@ const mockApi = (() => {
       return { ok: true };
     },
     async logout() { authed = false; },
+    async tgLoginStart() { throw new HttpError(0, t('В демо-режиме недоступно')); },
+    async tgLoginPoll() { return { state: 'expired' }; },
+    async sessions() {
+      return { sessions: [{ id: 'demo', current: true, device: navigator.platform || 'Demo', ip: 'local', created: Date.now(), seen: Date.now(), via: 'password' }], logins: [] };
+    },
+    async sessionEnd() { throw new HttpError(0, t('В демо-режиме недоступно')); },
+    async sessionsEndOthers() { return { ended: 0 }; },
     async list(section) {
       await delay(150);
       const items = data[section].slice();
@@ -719,6 +731,39 @@ function showLogin() {
   $('#login').hidden = false;
   animate(form, [{ opacity: 0, transform: 'scale(.96)' }, { opacity: 1, transform: 'none' }], 'smooth', { fill: 'none' });
   form.username.focus();
+  if (!MOCK) api.session().then((s) => { $('#login-telegram').hidden = !s?.telegram_login; }).catch(() => {});
+}
+
+/** "Войти через Telegram": the bot asks the owner; this page waits for the answer. */
+async function loginWithTelegram() {
+  const btn = $('#login-telegram'), wait = $('#login-tg-wait'), err = $('#login-error');
+  err.hidden = true;
+  btn.disabled = true;
+  try {
+    const { id, code } = await api.tgLoginStart();
+    wait.textContent = t('Откройте Telegram и нажмите «Войти». Код: {c}', { c: code });
+    wait.hidden = false;
+    const until = Date.now() + 180_000;
+    while (Date.now() < until && !$('#login').hidden) {
+      await new Promise((r) => setTimeout(r, 2000));
+      let answer;
+      try { answer = await api.tgLoginPoll(id); } catch { continue; }   // a dropped request is no answer
+      if (answer.state === 'ok') {
+        wait.hidden = true;
+        showApp();
+        return;
+      }
+      if (answer.state === 'denied') throw new Error(t('Вход отклонён в Telegram'));
+      if (answer.state === 'expired') break;
+    }
+    throw new Error(t('Время ожидания истекло — попробуйте ещё раз'));
+  } catch (ex) {
+    wait.hidden = true;
+    err.textContent = ex.message;
+    err.hidden = false;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function showApp() {
@@ -996,7 +1041,8 @@ function render() {
   const folder = openFolder[section];
   const view = folderView(section, list, folder);
   const searching = searchWords().length > 0;
-  const items = filterByQuery(view.items, (i) => i.name, section === 'files' ? (i) => contentSnippet('files', i.path) : null);
+  // Photos also match by what is in them (descriptions from the local model, `--ai on`).
+  const items = filterByQuery(view.items, (i) => (i.desc ? `${i.name} ${i.desc}` : i.name), section === 'files' ? (i) => contentSnippet('files', i.path) : null);
   const content = $('#content');
 
   const n = view.below.length;
@@ -1061,7 +1107,7 @@ function render() {
 function renderGrid(items) {
   const grid = el('div', { class: 'grid' });
   for (const item of items) {
-    const tile = el('button', { class: 'tile', title: item.name, onclick: () => onItemTap('photos', item) });
+    const tile = el('button', { class: 'tile', title: item.desc ? `${item.name}\n${item.desc}` : item.name, onclick: () => onItemTap('photos', item) });
     if (item.kind === 'image' || (item.kind === 'raw' && !MOCK)) {
       // HEIC has a thumbnail only once a browser made one (extras.js); otherwise try to make it.
       const src = api.thumbUrl('photos', item);
@@ -1532,6 +1578,7 @@ async function runUploads() {
 
 function bindUi() {
   $('#login-form').addEventListener('submit', onLogin);
+  $('#login-telegram').addEventListener('click', loginWithTelegram);
 
   document.querySelectorAll('.tab[data-section]').forEach((tab) => tab.addEventListener('click', () => setSection(tab.dataset.section)));
   window.addEventListener('scroll', onScroll, { passive: true });

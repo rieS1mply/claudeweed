@@ -43,6 +43,19 @@ pub fn store_preview(jpeg: &[u8], preview_dst: &Path, thumb_dst: &Path) -> Resul
     generate(preview_dst, thumb_dst)
 }
 
+/// The photo as a JPEG whose longer side is at most `side`, upright: what a vision model is
+/// shown (bigger only costs time, smaller loses detail like text on a receipt).
+pub fn jpeg_for_model(src: &Path, side: u32) -> Result<Vec<u8>> {
+    let mut decoder = ImageReader::open(src)?.with_guessed_format()?.into_decoder()?;
+    let orientation = decoder.orientation()?;
+    let mut img = DynamicImage::from_decoder(decoder)?;
+    img.apply_orientation(orientation);
+    let img = if img.width().max(img.height()) > side { img.thumbnail(side, side) } else { img };
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, 85).encode_image(&img.to_rgb8())?;
+    Ok(out)
+}
+
 pub fn generate(src: &Path, dst: &Path) -> Result<()> {
     let mut decoder = ImageReader::open(src)?.with_guessed_format()?.into_decoder()?;
     // Phones store photos sideways plus an "orientation" flag. Browsers apply it to the

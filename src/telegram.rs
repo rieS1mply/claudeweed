@@ -82,7 +82,7 @@ pub async fn get_updates(token: &str, offset: i64, timeout: u64) -> Result<Vec<V
     let updates = call(token, "getUpdates", json!({
         "offset": offset,
         "timeout": timeout,
-        "allowed_updates": ["message"],
+        "allowed_updates": ["message", "callback_query"],
     }))
     .await?;
     Ok(updates.as_array().cloned().unwrap_or_default())
@@ -138,6 +138,39 @@ pub async fn edit_message(tg: &TelegramConfig, message_id: i64, text: &str) -> R
     }))
     .await?;
     Ok(())
+}
+
+/// An HTML message with one row of buttons under it; a tap comes back as a callback query
+/// carrying the button's `data` (at most 64 bytes).
+pub async fn send_buttons(tg: &TelegramConfig, html: &str, buttons: &[(&str, String)]) -> Result<i64> {
+    let row: Vec<Value> = buttons.iter().map(|(label, data)| json!({ "text": label, "callback_data": data })).collect();
+    let msg = call(&tg.token, "sendMessage", json!({
+        "chat_id": tg.chat_id,
+        "text": html,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": true,
+        "reply_markup": { "inline_keyboard": [row] },
+    }))
+    .await?;
+    Ok(msg["message_id"].as_i64().unwrap_or(0))
+}
+
+/// Replaces an HTML message's text; its buttons go away.
+pub async fn edit_html(tg: &TelegramConfig, message_id: i64, html: &str) -> Result<()> {
+    call(&tg.token, "editMessageText", json!({
+        "chat_id": tg.chat_id,
+        "message_id": message_id,
+        "text": html,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": true,
+    }))
+    .await?;
+    Ok(())
+}
+
+/// Ends the "loading" on a tapped button, with a short note shown on top of the chat.
+pub async fn answer_callback(tg: &TelegramConfig, callback_id: &str, text: &str) {
+    let _ = call(&tg.token, "answerCallbackQuery", json!({ "callback_query_id": callback_id, "text": text })).await;
 }
 
 pub async fn delete_message(tg: &TelegramConfig, message_id: i64) -> Result<()> {

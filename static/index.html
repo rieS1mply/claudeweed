@@ -33,6 +33,9 @@
     </div>
     <div class="login-error" id="login-error" hidden></div>
     <button type="submit" class="btn primary wide" id="login-submit">Войти</button>
+    <!-- Only when a Telegram bot is set up and app codes are off: the owner confirms in the chat. -->
+    <button type="button" class="btn wide login-tg" id="login-telegram" hidden>Войти через Telegram</button>
+    <div class="login-tg-wait" id="login-tg-wait" hidden></div>
     <button type="button" class="btn link login-lang" id="login-lang"></button>
   </form>
 </div>
@@ -63,6 +66,9 @@
       </a>
       <button class="btn glass round" id="links-btn" type="button" title="Ссылки без пароля">
         <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>
+      </button>
+      <button class="btn glass round" id="devices-btn" type="button" title="Устройства и входы">
+        <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M12 3 5 6v5c0 4.5 3 8.3 7 10 4-1.7 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/></svg>
       </button>
       <button class="btn glass round" id="lang-btn" type="button" title="Язык">
         <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>

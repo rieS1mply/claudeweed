@@ -134,6 +134,12 @@ pub struct Config {
     /// Chat with Claude Code through the Telegram bot (`--agent on`): it acts on this computer.
     #[serde(default)]
     pub agent: bool,
+    /// Photo descriptions for search, made by a local Ollama model (`--ai on`).
+    #[serde(default)]
+    pub vision: bool,
+    /// Ollama model for them; empty = [`crate::vision::DEFAULT_MODEL`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision_model: Option<String>,
     /// Base32 secret of the authenticator app (`--2fa on`); login then also asks for its code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub totp_secret: Option<String>,
@@ -441,6 +447,8 @@ pub async fn setup(path: &Path, previous: Option<&Config>, suggestion: Option<&P
         runner: previous.is_some_and(|c| c.runner),
         files: previous.is_some_and(|c| c.files),
         agent: previous.is_some_and(|c| c.agent),
+        vision: previous.is_some_and(|c| c.vision),
+        vision_model: previous.and_then(|c| c.vision_model.clone()),
         totp_secret: previous.and_then(|c| c.totp_secret.clone()),
         backup_dir: previous.and_then(|c| c.backup_dir.clone()),
         named_tunnel: previous.and_then(|c| c.named_tunnel.clone()),
@@ -517,7 +525,7 @@ mod tests {
         let old_system = base.join(SYSTEM_DIR);
         std::fs::create_dir_all(old_system.join("trash/abc")).unwrap();
         std::fs::create_dir_all(base.join(LEGACY_STORAGE_DIR).join("Фото")).unwrap();
-        let cfg = Config { storage_dir: None, username: "u".into(), password_hash: "h".into(), port: 1, telegram: None, terminal: false, runner: false, files: false, agent: false, totp_secret: None, backup_dir: None, named_tunnel: None, funnel: None, upload_token: None, lang: None };
+        let cfg = Config { storage_dir: None, username: "u".into(), password_hash: "h".into(), port: 1, telegram: None, terminal: false, runner: false, files: false, agent: false, vision: false, vision_model: None, totp_secret: None, backup_dir: None, named_tunnel: None, funnel: None, upload_token: None, lang: None };
         cfg.save(&old_system.join(CONFIG_FILE)).unwrap();
         let config_dir = base.join("settings");
 

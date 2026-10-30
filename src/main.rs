@@ -4,6 +4,7 @@
 //! web interface on 127.0.0.1 and publishes it through a free Cloudflare quick
 //! tunnel; the public address is printed and sent to Telegram on every start.
 
+mod access;
 mod auth;
 mod backup;
 mod bot;
@@ -28,6 +29,7 @@ mod thumbs;
 mod trash;
 mod totp;
 mod tunnel;
+mod vision;
 mod web;
 mod zips;
 
@@ -62,6 +64,7 @@ struct Args {
     runner: Option<bool>,
     files: Option<bool>,
     agent: Option<bool>,
+    ai: Option<bool>,
     two_factor: Option<bool>,
     /// `Some(None)` = `--backup off`.
     backup: Option<Option<PathBuf>>,
@@ -96,6 +99,7 @@ local-photo — домашнее облако для фото и файлов
   --runner on|off     разрешить / запретить запуск кода на сайте (как онлайн-компилятор)
   --files on|off      «Компьютер» на сайте: все диски и папки, как Finder (чтение и изменение)
   --agent on|off      разговор с Claude Code этого компьютера через Telegram-бота / выключить
+  --ai on|off         поиск фото по содержимому («собака», «чек»): описания делает Ollama на этом компьютере
   --2fa on|off        вход с кодом из приложения (Google Authenticator и др.) / без кода
   --backup <папка>    каждый день копировать хранилище в эту папку (лучше другой диск)
   --backup off        не делать резервную копию
@@ -127,6 +131,7 @@ Usage: local-photo [options]
   --runner on|off     allow / forbid running code on the site (like an online compiler)
   --files on|off      “Computer” on the site: every disk and folder, like Finder (read and change)
   --agent on|off      chat with this computer's Claude Code through the Telegram bot / off
+  --ai on|off         search photos by content (“dog”, “receipt”): Ollama on this computer describes them
   --2fa on|off        log in with a code from an app (Google Authenticator etc.) / without
   --backup <folder>   copy the storage to this folder every day (another disk is better)
   --backup off        no backup
@@ -148,7 +153,7 @@ Usage: local-photo [options]
 fn parse_args() -> Result<Args> {
     let mut args = Args {
         dir: None, setup: false, no_tunnel: false, port: None, background: false, status: false, stop: false,
-        autostart: None, terminal: None, runner: None, files: None, agent: None, two_factor: None, backup: None, backup_now: false, named_tunnel: None,
+        autostart: None, terminal: None, runner: None, files: None, agent: None, ai: None, two_factor: None, backup: None, backup_now: false, named_tunnel: None,
         upload_token: None, lang: None, new_login: false,
     };
     let mut it = std::env::args().skip(1);
@@ -167,6 +172,7 @@ fn parse_args() -> Result<Args> {
             "--runner" => args.runner = Some(on_off(it.next(), "--runner")?),
             "--files" => args.files = Some(on_off(it.next(), "--files")?),
             "--agent" => args.agent = Some(on_off(it.next(), "--agent")?),
+            "--ai" => args.ai = Some(on_off(it.next(), "--ai")?),
             "--2fa" => args.two_factor = Some(on_off(it.next(), "--2fa")?),
             "--backup" => {
                 let v = it.next().context("после --backup нужна папка или off")?;
@@ -262,6 +268,9 @@ async fn print_status(config_dir: &Path) -> Result<()> {
     crate::say!("  Компьютер:   {}", if files { "открыт на сайте (--files off — закрыть)" } else { "закрыт (--files on — все папки на сайте)" });
     let agent = config.as_ref().is_some_and(|c| c.agent);
     crate::say!("  Claude:     {}", if agent { "отвечает в Telegram (--agent off — выключить)" } else { "выключен (--agent on — разговор через Telegram)" });
+    let ai = config.as_ref().is_some_and(|c| c.vision);
+    let described = vision::Vision::load(&config_dir.join("vision.json")).described();
+    crate::say!("  Поиск фото: {}", if ai { format!("по содержимому, описано фото: {described} (--ai off — выключить)") } else { "только по имени (--ai on — по содержимому, через Ollama)".into() });
     let two_factor = config.as_ref().is_some_and(|c| c.totp_secret.is_some());
     crate::say!("  Вход:        {}", if two_factor { "пароль + код из приложения" } else { "только пароль (--2fa on — добавить код)" });
     let address = match config.as_ref().and_then(|c| c.named_tunnel.as_ref()) {
@@ -496,6 +505,23 @@ async fn run() -> Result<()> {
         }
         return Ok(());
     }
+    if let Some(on) = args.ai {
+        let mut config = Config::load(&config_file)?.context("сначала настройте облако: запустите программу без параметров")?;
+        config.vision = on;
+        config.save(&config_file)?;
+        // Read live by the running cloud: descriptions start within a minute.
+        if on {
+            let model = config.vision_model.clone().unwrap_or_else(|| vision::DEFAULT_MODEL.to_string());
+            crate::say!("Поиск фото по содержимому включён: Ollama описывает фото в фоне, по одному.");
+            crate::say!("Модель: {model}. Ничего не уходит с компьютера. Ищите в «Фото»: «собака», «чек», «море».");
+            if runner::which("ollama").is_none() {
+                crate::say!("Внимание: Ollama не найдена. Установите её (https://ollama.com) и скачайте модель: ollama pull {model}");
+            }
+        } else {
+            crate::say!("Поиск фото по содержимому выключен. Уже готовые описания остаются.");
+        }
+        return Ok(());
+    }
     if let Some(on) = args.agent {
         let mut config = Config::load(&config_file)?.context("сначала настройте облако: запустите программу без параметров")?;
         if on && config.telegram.is_none() {
@@ -701,6 +727,7 @@ async fn run() -> Result<()> {
     let app = web::AppState::new(paths.clone(), config.clone(), auth, secret, stop.clone());
     web::spawn_upload_janitor(app.clone());
     web::spawn_terminal_saver(app.clone(), config_dir.join("terminal"));
+    vision::spawn(app.clone());
     let public_url: bot::PublicUrl = Default::default();
     // The bot runs whenever Telegram is set up, also without a tunnel.
     let bot = config.telegram.clone().map(|tg| {

@@ -364,6 +364,9 @@ pub struct Item {
     /// When the file appeared in the cloud (its birth time on disk).
     pub added: i64,
     pub kind: Kind,
+    /// What is in the photo, from the local vision model (`vision.rs`), for search.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desc: Option<String>,
 }
 
 pub fn list(root: &Path) -> Vec<Item> {
@@ -389,6 +392,7 @@ pub fn list(root: &Path) -> Vec<Item> {
                     size: meta.len(),
                     date: mtime_ms(&meta),
                     added: added_ms(&meta),
+                    desc: None,
                 });
             }
         }

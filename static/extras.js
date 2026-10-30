@@ -399,13 +399,57 @@ function closeMdView() {
   return leave($('#md'), [{ transform: 'none' }, { transform: 'translateY(100%)' }], 'smooth', { duration: 380 });
 }
 
+// ---------- devices and logins ----------
+
+const VIA = { password: 'по паролю', telegram: 'через Telegram' };
+
+/** "Устройства и входы": who is logged in (end one, or all the others) and recent attempts. */
+async function manageDevices() {
+  let data;
+  try { data = await api.sessions(); } catch (e) { return toast(e.message); }
+  const others = data.sessions.filter((s) => !s.current);
+  await actionSheet(t('Устройства и входы'), [
+    ...data.sessions.map((s) => ({
+      label: s.current ? t('{d} — это устройство', { d: s.device }) : s.device,
+      // Sessions from before this list existed know only when they expire.
+      hint: [s.ip, s.seen || s.created ? t('активен {d}', { d: fmtDate(s.seen || s.created) }) : t('вход до обновления'), VIA[s.via] && t(VIA[s.via])].filter(Boolean).join(' · '),
+      run: () => (s.current ? toast(t('Чтобы выйти здесь — «Выйти» в меню')) : endSession(s)),
+    })),
+    others.length && { label: t('Выйти на всех других ({n})', { n: others.length }), destructive: true, run: endOtherSessions },
+    data.logins.length && { label: t('Журнал входов'), hint: t('последние {n}', { n: data.logins.length }), run: () => showLogins(data.logins) },
+  ]);
+}
+
+function endSession(s) {
+  return actionSheet(s.device, [{ label: t('Завершить сеанс'), destructive: true, hint: s.ip, run: async () => {
+    try { await api.sessionEnd(s.id); toast(t('Сеанс завершён')); } catch (e) { toast(e.message); }
+  } }]);
+}
+
+async function endOtherSessions() {
+  try {
+    const { ended } = await api.sessionsEndOthers();
+    toast(t('Вышли устройств: {n}', { n: ended }));
+  } catch (e) { toast(e.message); }
+}
+
+function showLogins(logins) {
+  return actionSheet(t('Журнал входов'), logins.map((l) => ({
+    label: `${l.ok ? '✓' : '✗'} ${l.device}`,
+    hint: [l.ip, fmtDate(l.time), VIA[l.via] && t(VIA[l.via]), !l.ok && t('не удалось')].filter(Boolean).join(' · '),
+    run: () => {},
+  })));
+}
+
 // ---------- wiring ----------
 
 function bindExtras() {
   $('#search').addEventListener('input', searchContent);
   $('#links-btn').addEventListener('click', manageLinks);
+  $('#devices-btn').addEventListener('click', manageDevices);
   $('#more-btn').addEventListener('click', () => actionSheet('', [
     { label: t('Ссылки без пароля'), run: manageLinks },
+    { label: t('Устройства и входы'), run: manageDevices },
     { label: `${t('Язык')}: ${LANGS[LANG]}`, run: () => $('#lang-btn').click() },
     { label: t('Выйти'), destructive: true, run: () => $('#logout-btn').click() },
   ]));

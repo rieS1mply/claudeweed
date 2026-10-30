@@ -68,6 +68,10 @@ pub async fn run(app: App, tg: TelegramConfig, url: PublicUrl) {
             Ok(updates) => {
                 for update in updates {
                     offset = offset.max(update["update_id"].as_i64().unwrap_or(0) + 1);
+                    if update["callback_query"].is_object() {
+                        crate::access::on_callback(&app, &tg, &update["callback_query"]).await;
+                        continue;
+                    }
                     handle(&app, &tg, &url, &agent, &update["message"]).await;
                 }
             }
