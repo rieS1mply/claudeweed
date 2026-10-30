@@ -36,7 +36,7 @@
 
 **На этом компьютере:**
 
-- Исходники (рабочая копия, git → `github.com/rieS1mply/claudeweed`): `C:\Users\admin\Documents\claudeweed-main`.
+- Исходники (рабочая копия, git → `github.com/rieS1mply/greenclaude`): `C:\Users\admin\Documents\claudeweed-main`.
   Старый клон в `C:\Users\admin\Documents\cloud\claudeweed` — не основной.
 - Настройки и журнал: `%APPDATA%\local-photo\`. Хранилище с фото: `D:\Cloud`.
 - Установленная программа: `%LOCALAPPDATA%\Programs\local-photo\local-photo.exe` (на неё смотрит автозапуск).
@@ -144,8 +144,8 @@
   телефоне «Ссылки», «Язык» и «Выйти» спрятаны в «⋯» (`#more-btn`, `extras.js`).
 - Проверено в эмуляции телефона (390 px): кнопки, меню «⋯», заголовок. **Не проверено на iPhone**
   — владельцу проверить и прислать скриншот, если полоса или панель остались.
-- GitHub сообщает, что репозиторий переехал в `rieS1mply/greenclaude`; адрес remote не менялся
-  (решение владельца), пуш идёт через перенаправление.
+- Репозиторий переехал в `rieS1mply/greenclaude`; по разрешению владельца remote переключён на новый адрес
+  (`git remote set-url`).
 
 ### 2026-10-30 (12) — новые планы
 

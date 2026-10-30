@@ -2,7 +2,7 @@
 
 Этот файл для агента (Claude Code и подобных), которого попросили установить домашнее облако
 `local-photo` на компьютер пользователя. Человеку достаточно сказать агенту:
-«установи облако по INSTALL.md из https://github.com/rieS1mply/claudeweed».
+«установи облако по INSTALL.md из https://github.com/rieS1mply/greenclaude».
 
 Что получится: программа собирается из исходников, кладётся в постоянное место, человек сам проходит
 первую настройку (папка, логин, пароль, Telegram, терминал, автозапуск), облако работает в фоне
@@ -67,7 +67,7 @@ winget install --id Rustlang.Rustup -e
 ## 3. Исходники
 
 ```sh
-git clone https://github.com/rieS1mply/claudeweed.git
+git clone https://github.com/rieS1mply/greenclaude.git
 cd claudeweed
 ```
 
