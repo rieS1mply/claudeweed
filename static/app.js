@@ -727,10 +727,12 @@ function showApp() {
   load(state.section);
   // The terminal and the code runner are off unless the computer's owner turned them on.
   $('#term-btn').hidden = true;
+  $('#pc-btn').hidden = true;
   $('#code-btn').hidden = true;
   if (!MOCK) {
     api.session().then((s) => {
       $('#term-btn').hidden = !s?.terminal;
+      $('#pc-btn').hidden = !s?.files;
       setRunnerEnabled(Boolean(s?.runner));   // runner.js
     }).catch(() => {});
   }

@@ -42,10 +42,17 @@ impl Jobs {
 
     /// Starts building `files` into `<dir>/<id>.zip`; returns the job id.
     pub fn start(&self, dir: &Path, files: Vec<PathBuf>) -> String {
+        let named = files.into_iter().map(|f| (f.file_name().unwrap_or_default().to_string_lossy().into_owned(), f)).collect();
+        self.start_named(dir, named)
+    }
+
+    /// Like [`start`](Self::start), each file under its own name inside the archive
+    /// ("Folder/sub/file.txt" keeps folders).
+    pub fn start_named(&self, dir: &Path, files: Vec<(String, PathBuf)>) -> String {
         let id = crate::auth::random_hex(12);
         let job = Arc::new(Job {
             path: dir.join(format!("{id}.zip")),
-            total: files.iter().filter_map(|f| f.metadata().ok()).map(|m| m.len()).sum(),
+            total: files.iter().filter_map(|(_, f)| f.metadata().ok()).map(|m| m.len()).sum(),
             done: AtomicU64::new(0),
             state: Mutex::new(State::Building),
             created: Instant::now(),
@@ -76,12 +83,12 @@ impl Jobs {
     }
 }
 
-fn build(job: &Job, files: &[PathBuf]) -> Result<()> {
+fn build(job: &Job, files: &[(String, PathBuf)]) -> Result<()> {
     let mut zip = ZipWriter::new(BufWriter::new(File::create(&job.path)?));
     let mut used = HashMap::<String, u32>::new();
-    for file in files {
+    for (name, file) in files {
         let meta = file.metadata()?;
-        let name = unique_name(&mut used, &file.file_name().unwrap_or_default().to_string_lossy());
+        let name = unique_name(&mut used, name);
         // Photos and videos are already compressed; storing them as is is fast and loses nothing.
         let options = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Stored)

@@ -94,6 +94,8 @@ local-photo.exe), `--stop` убьёт и терминал, и самого Claud
 | `src/search.rs` | поиск по тексту заметок и текстовых файлов (`/api/search`) |
 | `src/shares.rs` | ссылки без пароля: `shares.json` в папке настроек; публичные маршруты `/s/{token}`, `/api/s/{token}/…` в `web.rs` (вне `protected`) |
 | `src/funnel.rs` | постоянный адрес через Tailscale Funnel (`--tunnel funnel`, `config.funnel` = https://…ts.net): `tailscale funnel --bg` раз в 10 мин, без cloudflared. Запросы через Funnel приходят с 127.0.0.1 с `X-Forwarded-For` — `auth::via_tunnel`/`client_ip` их учитывают |
+| `src/pc.rs` | «Компьютер» (`--files on`, `config.files`): весь компьютер на сайте, как Finder. `parse` (только абсолютные пути из обычных имён), `Pc::check` (ссылки раскрыты; настройки облака и `.local-photo` закрыты, системные папки Windows — только чтение, родителей закрытого не менять), список, места, поиск, размер папки, текст, копирование/перемещение/удаление фоновыми задачами (`Job`), Корзина Windows через `SHFileOperationW`. Маршруты `/api/pc/*` — в конце `web.rs` |
+| `static/files.html`, `finder.js`, `finder.css` | страница «Компьютер»: боковая панель, виды значки/список/колонки/галерея, Quick Look, меню, перетаскивание, клавиши Finder; на телефоне — как «Файлы» iPhone. Своя `h()` (и `el = h` для `markdown.js`) |
 | `src/i18n.rs`, `src/lang_en.rs` | язык консоли/Telegram (`--lang`), `say!`, `tr()` |
 | свои папки | `storage::folders`/`folder_name` (папки верхнего уровня, кроме годов), `/api/folder`, `/api/file/move`; `prune_empty_dirs` их не удаляет |
 | автозагрузка | `POST /api/auto-upload` с `Authorization: Bearer` (ключ `--upload-token new`, в конфиге SHA-256), вне `protected`; повтор (имя+размер в месяце) пропускается |
@@ -127,8 +129,11 @@ Node есть в VS Code: `ELECTRON_RUN_AS_NODE=1 "%LOCALAPPDATA%\Programs\Micro
 - Удаление = перенос в корзину, не `remove_file`.
 - Тяжёлая работа с диском/картинками — в `spawn_blocking`; размещение файлов под `place_lock`.
 - CSP запрещает inline-скрипты и стили (кроме страницы терминала): никаких `onclick=""` и `<style>` в HTML.
-- Терминал, запуск кода и Claude в Telegram включает только владелец на самом компьютере
-  (`--terminal on`, `--runner on`, `--agent on`), не код и не агент.
+- Терминал, запуск кода, «Компьютер» и Claude в Telegram включает только владелец на самом
+  компьютере (`--terminal on`, `--runner on`, `--files on`, `--agent on`), не код и не агент.
+- «Компьютер»: любой путь от клиента — только через `pc::parse` + `Pc::check` (`pc_path` в
+  `web.rs`), имена — через `pc::plain_name`. Удаление — в Корзину, «сразу» — только по явному
+  выбору владельца с подтверждением.
 - Бот слушает только чат владельца (`chat_id` из настройки); текст разговора с Claude не
   писать в журнал.
 - Новый язык для запуска: строка в `LANGS` (`src/runner.rs`), расширение в `RUN_LANG`,

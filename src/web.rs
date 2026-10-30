@@ -24,7 +24,7 @@ use tower_http::services::ServeFile;
 use crate::auth::{self, Auth};
 use crate::config::{Config, Paths};
 use crate::storage::{self, Kind, Section};
-use crate::{notes, runner, search, shares, telegram, terminal, thumbs, totp, trash, zips};
+use crate::{notes, pc, runner, search, shares, telegram, terminal, thumbs, totp, trash, zips};
 
 /// Matches CHUNK_SIZE in app.js, with headroom.
 const MAX_CHUNK: usize = 20 * 1024 * 1024;
@@ -53,6 +53,8 @@ pub struct AppState {
     /// Last authenticator step accepted at login: the same code can't log in twice.
     totp_last_step: std::sync::Mutex<u64>,
     shares: shares::Shares,
+    /// «Компьютер» (`--files on`): the whole computer, like Finder.
+    pc: pc::Pc,
 }
 
 struct Upload {
@@ -72,7 +74,10 @@ pub type App = Arc<AppState>;
 impl AppState {
     pub fn new(paths: Paths, config: Config, auth: Auth, local_secret: String, stop: Arc<tokio::sync::Notify>) -> App {
         let shares_file = paths.config.with_file_name("shares.json");
+        // Password hash, bot token, sessions; thumbnails and the cloud's trash.
+        let closed: Vec<PathBuf> = paths.config.parent().map(PathBuf::from).into_iter().chain([paths.storage.join(crate::config::SYSTEM_DIR)]).collect();
         Arc::new(AppState {
+            pc: pc::Pc::new(&closed),
             shares: shares::Shares::load(&shares_file),
             paths,
             config,
@@ -100,6 +105,10 @@ impl AppState {
 
     fn runner_enabled(&self) -> bool {
         Config::load(&self.paths.config).ok().flatten().map_or(self.config.runner, |c| c.runner)
+    }
+
+    fn files_enabled(&self) -> bool {
+        Config::load(&self.paths.config).ok().flatten().map_or(self.config.files, |c| c.files)
     }
 
     /// Also read live: `--2fa on` takes effect for the next login without a restart.
@@ -159,6 +168,20 @@ pub fn router(app: App) -> Router {
         .route("/api/shares", get(shares_list).post(share_create))
         .route("/api/shares/{token}", axum::routing::delete(share_revoke))
         .route("/api/preview", get(preview_get).put(preview_put).layer(DefaultBodyLimit::max(MAX_PREVIEW)))
+        .route("/api/pc/places", get(pc_places))
+        .route("/api/pc/list", get(pc_list))
+        .route("/api/pc/file", get(pc_file))
+        .route("/api/pc/thumb", get(pc_thumb))
+        .route("/api/pc/text", get(pc_text).put(pc_save).layer(DefaultBodyLimit::max(MAX_EDIT_BODY)))
+        .route("/api/pc/info", get(pc_info))
+        .route("/api/pc/search", get(pc_search))
+        .route("/api/pc/mkdir", post(pc_mkdir))
+        .route("/api/pc/rename", post(pc_rename))
+        .route("/api/pc/transfer", post(pc_transfer))
+        .route("/api/pc/delete", post(pc_delete))
+        .route("/api/pc/zip", post(pc_zip))
+        .route("/api/pc/jobs/{id}", get(pc_job).delete(pc_job_cancel))
+        .route("/api/pc/upload", put(pc_upload).layer(DefaultBodyLimit::max(MAX_CHUNK)))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_session));
 
     Router::new()
@@ -432,7 +455,7 @@ fn asset_response(name: &str, headers: &HeaderMap) -> Response {
 
 async fn session(State(app): State<App>, headers: HeaderMap) -> Response {
     let authenticated = app.auth.is_valid(&headers);
-    Json(json!({ "authenticated": authenticated, "terminal": authenticated && app.terminal_enabled(), "runner": authenticated && app.runner_enabled() })).into_response()
+    Json(json!({ "authenticated": authenticated, "terminal": authenticated && app.terminal_enabled(), "runner": authenticated && app.runner_enabled(), "files": authenticated && app.files_enabled() })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1712,4 +1735,438 @@ async fn auto_upload(State(app): State<App>, headers: HeaderMap, Query(q): Query
         Ok(Err(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Не удалось сохранить: {e:#}")),
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось сохранить"),
     }
+}
+
+// ---------- «Компьютер»: the whole computer, like Finder (pc.rs) ----------
+
+#[derive(Deserialize)]
+struct PcQuery {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    download: Option<String>,
+    /// Open a PDF in the browser's viewer instead of downloading it.
+    #[serde(default)]
+    view: Option<String>,
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    hidden: Option<String>,
+    /// For saving: the file's mtime the page started from (a newer one = changed meanwhile).
+    #[serde(default)]
+    mtime: Option<i64>,
+}
+
+fn pc_disabled() -> Response {
+    error(StatusCode::NOT_FOUND, "«Компьютер» выключен")
+}
+
+/// A path from the page: `(as the page wrote it, real location)`, checked for `access`.
+/// The error is the finished answer for the page; handlers return it right away.
+#[allow(clippy::result_large_err)]
+fn pc_path(app: &AppState, raw: &str, access: pc::Access) -> Result<(PathBuf, PathBuf), Response> {
+    if !app.files_enabled() {
+        return Err(pc_disabled());
+    }
+    let path = pc::parse(raw).ok_or_else(|| error(StatusCode::BAD_REQUEST, "Неверный путь"))?;
+    match app.pc.check(&path, access) {
+        Ok(real) => Ok((path, real)),
+        Err(msg) if msg == "Файл не найден" || msg == "Папка не найдена" => Err(error(StatusCode::NOT_FOUND, msg)),
+        Err(msg) => Err(error(StatusCode::FORBIDDEN, msg)),
+    }
+}
+
+/// Several paths for a copy, move, delete or archive; at most this many at once.
+const PC_MAX_ITEMS: usize = 2000;
+
+#[allow(clippy::result_large_err)]
+fn pc_paths(app: &AppState, raw: &[String], access: pc::Access) -> Result<Vec<PathBuf>, Response> {
+    if raw.is_empty() || raw.len() > PC_MAX_ITEMS {
+        return Err(error(StatusCode::BAD_REQUEST, "Выберите от 1 до 2000 объектов"));
+    }
+    raw.iter().map(|p| pc_path(app, p, access).map(|(_, real)| real)).collect::<Result<_, _>>()
+}
+
+async fn pc_places(State(app): State<App>, headers: HeaderMap) -> Response {
+    if !app.files_enabled() {
+        return pc_disabled();
+    }
+    let ip = auth::client_ip(&headers);
+    if app.pc.should_notify(&ip) {
+        crate::log!("Компьютер: открыт (адрес: {ip})");
+        if let Some(tg) = app.config.telegram.clone() {
+            let text = format!("Открыт раздел «Компьютер» облака (адрес: {ip}). Если это не вы — смените пароль: local-photo --setup");
+            tokio::spawn(async move { telegram::send_with_retry(&tg, &text).await });
+        }
+    }
+    let cloud = vec![("Облако · Фото", app.section_root(Section::Photos)), ("Облако · Файлы", app.section_root(Section::Files))];
+    match tokio::task::spawn_blocking(move || pc::places(&cloud)).await {
+        Ok(places) => Json(places).into_response(),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка"),
+    }
+}
+
+async fn pc_list(State(app): State<App>, Query(q): Query<PcQuery>) -> Response {
+    let (path, real) = match pc_path(&app, &q.path, pc::Access::Read) {
+        Ok(p) => p,
+        Err(res) => return res,
+    };
+    let dir = real.clone();
+    match tokio::task::spawn_blocking(move || pc::list(&dir)).await {
+        Ok(Ok(entries)) => {
+            let writable = app.pc.check(&real.join("x"), pc::Access::Create).is_ok();
+            let free = fs4::available_space(&real).ok();
+            Json(json!({ "path": pc::display(&path), "entries": entries, "writable": writable, "free": free })).into_response()
+        }
+        Ok(Err(e)) => error(StatusCode::FORBIDDEN, &format!("{e:#}")),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка"),
+    }
+}
+
+fn is_audio(name: &str) -> bool {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    matches!(ext.as_str(), "mp3" | "m4a" | "aac" | "wav" | "ogg" | "oga" | "opus" | "flac" | "weba")
+}
+
+/// Photos, videos and music open in the page; PDFs with `view=1` in the browser's viewer;
+/// everything else downloads (an .html from the disk must never run as this site).
+async fn pc_file(State(app): State<App>, Query(q): Query<PcQuery>, req: Request) -> Response {
+    let (_, real) = match pc_path(&app, &q.path, pc::Access::Read) {
+        Ok(p) => p,
+        Err(res) => return res,
+    };
+    if real.is_dir() {
+        return error(StatusCode::BAD_REQUEST, "Это папка");
+    }
+    if q.view.is_some() && is_pdf(&q.path) {
+        return serve_pdf(&real, req).await;
+    }
+    let inline = q.download.is_none() && (matches!(Kind::of(&q.path), Kind::Image | Kind::Video) || is_audio(&q.path));
+    serve_stored(&real, inline, req).await
+}
+
+async fn pc_thumb(State(app): State<App>, Query(q): Query<PcQuery>) -> Response {
+    let (_, real) = match pc_path(&app, &q.path, pc::Access::Read) {
+        Ok(p) => p,
+        Err(res) => return res,
+    };
+    let small = tokio::fs::metadata(&real).await.is_ok_and(|m| m.is_file() && m.len() <= pc::MAX_THUMB_SOURCE);
+    if Kind::of(&q.path) != Kind::Image || !small {
+        return not_found();
+    }
+    let key = pc::display(&real);
+    thumb_response(&app, "pc", &key, real).await
+}
+
+async fn pc_text(State(app): State<App>, Query(q): Query<PcQuery>) -> Response {
+    let (_, real) = match pc_path(&app, &q.path, pc::Access::Read) {
+        Ok(p) => p,
+        Err(res) => return res,
+    };
+    let writable = app.pc.check(&real, pc::Access::Change).is_ok();
+    let read = tokio::task::spawn_blocking(move || {
+        let text = pc::read_text(&real)?;
+        let mtime = std::fs::metadata(&real).map(|m| storage::mtime_ms(&m)).unwrap_or(0);
+        anyhow::Ok((text, mtime))
+    })
+    .await;
+    match read {
+        Ok(Ok(((text, exact), mtime))) => Json(json!({ "text": text, "exact": exact, "mtime": mtime, "writable": writable && exact })).into_response(),
+        Ok(Err(e)) => error(StatusCode::UNPROCESSABLE_ENTITY, &format!("{e:#}")),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка"),
+    }
+}
+
+async fn pc_save(State(app): State<App>, Query(q): Query<PcQuery>, body: Bytes) -> Response {
+    let (path, real) = match pc_path(&app, &q.path, pc::Access::Change) {
+        Ok(p) => p,
+        Err(res) => return res,
+    };
+    if body.len() as u64 > pc::MAX_TEXT {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "Файл слишком большой, чтобы открыть его как текст");
+    }
+    let base = q.mtime;
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<i64> {
+        let meta = std::fs::metadata(&real)?;
+        if !meta.is_file() {
+            anyhow::bail!("Это папка");
+        }
+        if base.is_some_and(|m| m != storage::mtime_ms(&meta)) {
+            anyhow::bail!("Файл изменился на компьютере, пока он был открыт. Откройте его заново");
+        }
+        pc::write_text(&real, &body)?;
+        Ok(std::fs::metadata(&real).map(|m| storage::mtime_ms(&m)).unwrap_or(0))
+    })
+    .await;
+    match result {
+        Ok(Ok(mtime)) => {
+            crate::log!("Компьютер: сохранён {}", pc::display(&path));
+            Json(json!({ "mtime": mtime })).into_response()
+        }
+        Ok(Err(e)) => error(StatusCode::CONFLICT, &format!("{e:#}")),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка"),
+    }
+}
+
+async fn pc_info(State(app): State<App>, Query(q): Query<PcQuery>) -> Response {
+    let (_, real) = match pc_path(&app, &q.path, pc::Access::Read) {
+        Ok(p) => p,
+        Err(res) => return res,
+    };
+    let info = tokio::task::spawn_blocking(move || {
+        let meta = std::fs::metadata(&real).ok()?;
+        let created = meta.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64);
+        let mtime = storage::mtime_ms(&meta);
+        Some(if meta.is_dir() {
+            let (bytes, files, dirs, complete) = pc::folder_size(&real);
+            json!({ "dir": true, "size": bytes, "files": files, "dirs": dirs, "complete": complete, "mtime": mtime, "created": created })
+        } else {
+            json!({ "dir": false, "size": meta.len(), "mtime": mtime, "created": created, "readonly": meta.permissions().readonly() })
+        })
+    })
+    .await;
+    match info {
+        Ok(Some(v)) => Json(v).into_response(),
+        _ => not_found(),
+    }
+}
+
+async fn pc_search(State(app): State<App>, Query(q): Query<PcQuery>) -> Response {
+    let (_, real) = match pc_path(&app, &q.path, pc::Access::Read) {
+        Ok(p) => p,
+        Err(res) => return res,
+    };
+    let query = q.q.unwrap_or_default();
+    let hidden = q.hidden.is_some();
+    let worker = app.clone();
+    match tokio::task::spawn_blocking(move || pc::search(&worker.pc, &real, &query, hidden)).await {
+        Ok((hits, more)) => Json(json!({ "hits": hits, "more": more })).into_response(),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка"),
+    }
+}
+
+#[derive(Deserialize)]
+struct PcNameBody {
+    path: String,
+    name: String,
+}
+
+/// `dir` + separator + `name`, as the page would write it.
+fn pc_child(dir: &str, name: &str) -> String {
+    format!("{}{}{name}", dir.trim_end_matches(['\\', '/']), std::path::MAIN_SEPARATOR)
+}
+
+async fn pc_mkdir(State(app): State<App>, Json(body): Json<PcNameBody>) -> Response {
+    let name = body.name.trim();
+    if !pc::plain_name(name) {
+        return error(StatusCode::BAD_REQUEST, "Недопустимое имя");
+    }
+    let (path, real) = match pc_path(&app, &pc_child(&body.path, name), pc::Access::Create) {
+        Ok(p) => p,
+        Err(res) => return res,
+    };
+    match pc::create_dir(&real) {
+        Ok(()) => {
+            crate::log!("Компьютер: создана папка {}", pc::display(&path));
+            Json(json!({ "path": pc::display(&path) })).into_response()
+        }
+        Err(e) => error(StatusCode::CONFLICT, &format!("{e:#}")),
+    }
+}
+
+async fn pc_rename(State(app): State<App>, Json(body): Json<PcNameBody>) -> Response {
+    let name = body.name.trim();
+    if !pc::plain_name(name) {
+        return error(StatusCode::BAD_REQUEST, "Недопустимое имя");
+    }
+    let (path, real) = match pc_path(&app, &body.path, pc::Access::Change) {
+        Ok(p) => p,
+        Err(res) => return res,
+    };
+    let new_path = path.with_file_name(name);
+    match pc::rename(&real, name) {
+        Ok(_) => {
+            crate::log!("Компьютер: {} → {name}", pc::display(&path));
+            Json(json!({ "path": pc::display(&new_path) })).into_response()
+        }
+        Err(e) => error(StatusCode::CONFLICT, &format!("{e:#}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct PcTransferBody {
+    paths: Vec<String>,
+    to: String,
+    #[serde(default, rename = "move")]
+    moving: bool,
+}
+
+async fn pc_transfer(State(app): State<App>, Json(body): Json<PcTransferBody>) -> Response {
+    let access = if body.moving { pc::Access::Change } else { pc::Access::Read };
+    let sources = match pc_paths(&app, &body.paths, access) {
+        Ok(p) => p,
+        Err(res) => return res,
+    };
+    let (dest_shown, dest) = match pc_path(&app, &body.to, pc::Access::Create) {
+        Ok(p) => p,
+        Err(res) => return res,
+    };
+    if !dest.is_dir() {
+        return error(StatusCode::BAD_REQUEST, "Папка не найдена");
+    }
+    let verb = if body.moving { "перемещение" } else { "копирование" };
+    crate::log!("Компьютер: {verb} {} → {}", sources.len(), pc::display(&dest_shown));
+    let moving = body.moving;
+    let id = app.pc.start(if moving { "move" } else { "copy" }, move |job| pc::transfer(job, &sources, &dest, moving));
+    Json(json!({ "job": id })).into_response()
+}
+
+#[derive(Deserialize)]
+struct PcDeleteBody {
+    paths: Vec<String>,
+    /// Skip the Recycle Bin (the page asks first).
+    #[serde(default)]
+    now: bool,
+}
+
+async fn pc_delete(State(app): State<App>, Json(body): Json<PcDeleteBody>) -> Response {
+    let targets = match pc_paths(&app, &body.paths, pc::Access::Change) {
+        Ok(p) => p,
+        Err(res) => return res,
+    };
+    let shown: Vec<String> = targets.iter().take(5).map(|p| pc::display(p)).collect();
+    let how = if body.now { "удалено навсегда" } else { "в Корзину" };
+    crate::log!("Компьютер: {how} {}: {}", targets.len(), shown.join(", "));
+    let now = body.now;
+    let id = app.pc.start("delete", move |job| pc::delete(job, &targets, now));
+    Json(json!({ "job": id })).into_response()
+}
+
+#[derive(Deserialize)]
+struct PcZipBody {
+    paths: Vec<String>,
+}
+
+async fn pc_zip(State(app): State<App>, Json(body): Json<PcZipBody>) -> Response {
+    let sources = match pc_paths(&app, &body.paths, pc::Access::Read) {
+        Ok(p) => p,
+        Err(res) => return res,
+    };
+    // Folders go in with their insides, under their own name; links aren't followed.
+    let files = tokio::task::spawn_blocking(move || {
+        let mut files = Vec::new();
+        let mut stack: Vec<(String, PathBuf)> =
+            sources.iter().map(|s| (s.file_name().unwrap_or_default().to_string_lossy().into_owned(), s.clone())).collect();
+        while let Some((name, path)) = stack.pop() {
+            if files.len() > MAX_ZIP_FILES {
+                break;
+            }
+            match std::fs::symlink_metadata(&path) {
+                Ok(m) if m.is_dir() => {
+                    for e in std::fs::read_dir(&path).into_iter().flatten().flatten() {
+                        stack.push((format!("{name}/{}", e.file_name().to_string_lossy()), e.path()));
+                    }
+                }
+                Ok(m) if m.is_file() => files.push((name, path)),
+                _ => {}
+            }
+        }
+        files
+    })
+    .await
+    .unwrap_or_default();
+    if files.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "В выбранном нет файлов");
+    }
+    if files.len() > MAX_ZIP_FILES {
+        return error(StatusCode::BAD_REQUEST, "Слишком много файлов для одного архива (больше 5000)");
+    }
+    let count = files.len();
+    let id = app.zips.start_named(&app.paths.uploads, files);
+    crate::log!("Компьютер: архив {id}, файлов: {count}");
+    Json(json!({ "id": id })).into_response()
+}
+
+async fn pc_job(State(app): State<App>, UrlPath(id): UrlPath<String>) -> Response {
+    match app.pc.job(&id) {
+        Some(job) => Json(job.json()).into_response(),
+        None => error(StatusCode::NOT_FOUND, "Задача не найдена"),
+    }
+}
+
+async fn pc_job_cancel(State(app): State<App>, UrlPath(id): UrlPath<String>) -> Response {
+    match app.pc.job(&id) {
+        Some(job) => {
+            job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        None => error(StatusCode::NOT_FOUND, "Задача не найдена"),
+    }
+}
+
+#[derive(Deserialize)]
+struct PcUploadQuery {
+    /// The folder the file goes into.
+    path: String,
+    name: String,
+    offset: u64,
+    total: u64,
+}
+
+/// One piece of a file going into a folder of the computer. Pieces arrive in order into a
+/// hidden part file next to the target; the last one gives it its name (" (2)" if taken).
+/// A piece that doesn't fit where the part file ends gets 409 with what arrived so far,
+/// so the page can continue from there.
+async fn pc_upload(State(app): State<App>, Query(q): Query<PcUploadQuery>, body: Bytes) -> Response {
+    let name = storage::sanitize_filename(&q.name);
+    if !pc::plain_name(&name) {
+        return error(StatusCode::BAD_REQUEST, "Недопустимое имя");
+    }
+    let (dir_shown, dir) = match pc_path(&app, &q.path, pc::Access::Create) {
+        Ok(p) => p,
+        Err(res) => return res,
+    };
+    if !dir.is_dir() {
+        return error(StatusCode::NOT_FOUND, "Папка не найдена");
+    }
+    let part = dir.join(format!(".{name}.lp-upload"));
+    let opened = if q.offset == 0 {
+        tokio::fs::File::create(&part).await
+    } else {
+        tokio::fs::OpenOptions::new().append(true).open(&part).await
+    };
+    let mut file = match opened {
+        Ok(f) => f,
+        Err(e) => return error(StatusCode::CONFLICT, &format!("Не удалось записать: {e}")),
+    };
+    let received = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    if received != q.offset {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "Загрузка разошлась, продолжаю", "received": received }))).into_response();
+    }
+    if received + body.len() as u64 > q.total {
+        drop(file);
+        let _ = tokio::fs::remove_file(&part).await;
+        return error(StatusCode::BAD_REQUEST, "Файл больше, чем заявлено");
+    }
+    if let Err(e) = async {
+        file.write_all(&body).await?;
+        file.flush().await
+    }
+    .await
+    {
+        return error(StatusCode::INSUFFICIENT_STORAGE, &format!("Не удалось записать: {e}"));
+    }
+    drop(file);
+    let received = received + body.len() as u64;
+    if received < q.total {
+        return Json(json!({ "done": false, "received": received })).into_response();
+    }
+    let target = storage::unique_path(&dir, &name);
+    if let Err(e) = tokio::fs::rename(&part, &target).await {
+        return error(StatusCode::CONFLICT, &format!("Не удалось записать: {e}"));
+    }
+    let final_name = target.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let shown = dir_shown.join(&final_name);
+    crate::log!("Компьютер: загружен {}", pc::display(&shown));
+    Json(json!({ "done": true, "path": pc::display(&shown) })).into_response()
 }

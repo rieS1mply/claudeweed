@@ -21,6 +21,7 @@ mod service;
 mod shares;
 mod storage;
 mod telegram;
+mod pc;
 mod terminal;
 mod terminal_store;
 mod thumbs;
@@ -59,6 +60,7 @@ struct Args {
     autostart: Option<bool>,
     terminal: Option<bool>,
     runner: Option<bool>,
+    files: Option<bool>,
     agent: Option<bool>,
     two_factor: Option<bool>,
     /// `Some(None)` = `--backup off`.
@@ -91,6 +93,7 @@ local-photo — домашнее облако для фото и файлов
   --autostart on|off  запускать облако само при входе в систему (в фоне) / не запускать
   --terminal on|off   разрешить / запретить терминал этого компьютера на сайте
   --runner on|off     разрешить / запретить запуск кода на сайте (как онлайн-компилятор)
+  --files on|off      «Компьютер» на сайте: все диски и папки, как Finder (чтение и изменение)
   --agent on|off      разговор с Claude Code этого компьютера через Telegram-бота / выключить
   --2fa on|off        вход с кодом из приложения (Google Authenticator и др.) / без кода
   --backup <папка>    каждый день копировать хранилище в эту папку (лучше другой диск)
@@ -120,6 +123,7 @@ Usage: local-photo [options]
   --autostart on|off  start the cloud by itself at login (in the background) / don't
   --terminal on|off   allow / forbid this computer's terminal on the site
   --runner on|off     allow / forbid running code on the site (like an online compiler)
+  --files on|off      “Computer” on the site: every disk and folder, like Finder (read and change)
   --agent on|off      chat with this computer's Claude Code through the Telegram bot / off
   --2fa on|off        log in with a code from an app (Google Authenticator etc.) / without
   --backup <folder>   copy the storage to this folder every day (another disk is better)
@@ -141,7 +145,7 @@ Usage: local-photo [options]
 fn parse_args() -> Result<Args> {
     let mut args = Args {
         dir: None, setup: false, no_tunnel: false, port: None, background: false, status: false, stop: false,
-        autostart: None, terminal: None, runner: None, agent: None, two_factor: None, backup: None, backup_now: false, named_tunnel: None,
+        autostart: None, terminal: None, runner: None, files: None, agent: None, two_factor: None, backup: None, backup_now: false, named_tunnel: None,
         upload_token: None, lang: None,
     };
     let mut it = std::env::args().skip(1);
@@ -157,6 +161,7 @@ fn parse_args() -> Result<Args> {
             "--autostart" => args.autostart = Some(on_off(it.next(), "--autostart")?),
             "--terminal" => args.terminal = Some(on_off(it.next(), "--terminal")?),
             "--runner" => args.runner = Some(on_off(it.next(), "--runner")?),
+            "--files" => args.files = Some(on_off(it.next(), "--files")?),
             "--agent" => args.agent = Some(on_off(it.next(), "--agent")?),
             "--2fa" => args.two_factor = Some(on_off(it.next(), "--2fa")?),
             "--backup" => {
@@ -249,8 +254,10 @@ async fn print_status(config_dir: &Path) -> Result<()> {
     crate::say!("  Терминал:    {}", if terminal { "включён (--terminal off — выключить)" } else { "выключен" });
     let runner = config.as_ref().is_some_and(|c| c.runner);
     crate::say!("  Запуск кода: {}", if runner { "включён (--runner off — выключить)" } else { "выключен (--runner on — включить)" });
+    let files = config.as_ref().is_some_and(|c| c.files);
+    crate::say!("  Компьютер:   {}", if files { "открыт на сайте (--files off — закрыть)" } else { "закрыт (--files on — все папки на сайте)" });
     let agent = config.as_ref().is_some_and(|c| c.agent);
-    crate::say!("  Claude:      {}", if agent { "отвечает в Telegram (--agent off — выключить)" } else { "выключен (--agent on — разговор через Telegram)" });
+    crate::say!("  Claude:     {}", if agent { "отвечает в Telegram (--agent off — выключить)" } else { "выключен (--agent on — разговор через Telegram)" });
     let two_factor = config.as_ref().is_some_and(|c| c.totp_secret.is_some());
     crate::say!("  Вход:        {}", if two_factor { "пароль + код из приложения" } else { "только пароль (--2fa on — добавить код)" });
     let address = match config.as_ref().and_then(|c| c.named_tunnel.as_ref()) {
@@ -434,6 +441,21 @@ async fn run() -> Result<()> {
             crate::say!("может выполнить любой код. Включите вход с кодом из приложения: local-photo --2fa on");
         } else {
             crate::say!("Запуск кода выключен.");
+        }
+        return Ok(());
+    }
+    if let Some(on) = args.files {
+        let mut config = Config::load(&config_file)?.context("сначала настройте облако: запустите программу без параметров")?;
+        config.files = on;
+        config.save(&config_file)?;
+        // Read live by the running cloud, like the terminal setting.
+        if on {
+            crate::say!("«Компьютер» включён: кнопка появится на сайте после обновления страницы.");
+            crate::say!("Кто знает пароль — может читать, менять и удалять любые ваши файлы. Удаление — в Корзину.");
+            crate::say!("Закрыты всегда: настройки облака; системные папки Windows — только просмотр.");
+            crate::say!("Включите вход с кодом из приложения: local-photo --2fa on");
+        } else {
+            crate::say!("«Компьютер» выключен.");
         }
         return Ok(());
     }
