@@ -875,7 +875,9 @@ a.btn { color: inherit; text-decoration: none; }
 /* ---------- iPhone: top edge and bottom bar ---------- */
 /* Safari tints the status-bar area with the colour of a fixed bar at the top edge. Without
    this strip it took the nav's dark glass and smeared it over the top of the screen; a
-   page-coloured strip there also keeps scrolled content from showing under the clock. */
+   page-coloured strip there also keeps scrolled content from showing under the clock.
+   Home-screen app: status bar style is "black" (solid), not "black-translucent" — with the
+   translucent bar iOS laid its dark tint over the top of the page. */
 .top-edge {
   position: fixed; z-index: 19; top: 0; left: 0; right: 0;
   height: env(safe-area-inset-top); background: var(--bg); pointer-events: none;
