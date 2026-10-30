@@ -115,6 +115,48 @@ pub async fn reply(tg: &TelegramConfig, reply_to: i64, text: &str) -> Result<()>
     Ok(())
 }
 
+/// Sends a message (as an answer to `reply_to`, if given; `html`: Telegram's HTML subset)
+/// and returns its id, so it can be edited later.
+pub async fn send_message(tg: &TelegramConfig, text: &str, reply_to: Option<i64>, html: bool) -> Result<i64> {
+    let mut body = json!({ "chat_id": tg.chat_id, "text": text, "disable_web_page_preview": true });
+    if let Some(id) = reply_to {
+        body["reply_parameters"] = json!({ "message_id": id, "allow_sending_without_reply": true });
+    }
+    if html {
+        body["parse_mode"] = json!("HTML");
+    }
+    let msg = call(&tg.token, "sendMessage", body).await?;
+    Ok(msg["message_id"].as_i64().unwrap_or(0))
+}
+
+pub async fn edit_message(tg: &TelegramConfig, message_id: i64, text: &str) -> Result<()> {
+    call(&tg.token, "editMessageText", json!({
+        "chat_id": tg.chat_id,
+        "message_id": message_id,
+        "text": text,
+        "disable_web_page_preview": true,
+    }))
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_message(tg: &TelegramConfig, message_id: i64) -> Result<()> {
+    call(&tg.token, "deleteMessage", json!({ "chat_id": tg.chat_id, "message_id": message_id })).await?;
+    Ok(())
+}
+
+/// "typing…" under the bot's name; Telegram shows it for about 5 seconds.
+pub async fn typing(tg: &TelegramConfig) {
+    let _ = call(&tg.token, "sendChatAction", json!({ "chat_id": tg.chat_id, "action": "typing" })).await;
+}
+
+/// The menu of commands shown by the "/" button.
+pub async fn set_commands(tg: &TelegramConfig, commands: &[(&str, &str)]) -> Result<()> {
+    let list: Vec<Value> = commands.iter().map(|(c, d)| json!({ "command": c, "description": d })).collect();
+    call(&tg.token, "setMyCommands", json!({ "commands": list })).await?;
+    Ok(())
+}
+
 pub async fn send(tg: &TelegramConfig, text: &str) -> Result<()> {
     call(&tg.token, "sendMessage", json!({
         "chat_id": tg.chat_id,

@@ -290,7 +290,7 @@ fn work_dir() -> std::io::Result<PathBuf> {
 /// the owner's computer: a stray `"` in PATH makes std's parser glue every later folder into
 /// one, and the Microsoft Store python.exe is an "app execution alias" that file checks
 /// can't open (it is found by listing its folder instead).
-fn which(program: &str) -> Option<PathBuf> {
+pub(crate) fn which(program: &str) -> Option<PathBuf> {
     let path = Path::new(program);
     if path.is_absolute() {
         return Some(path.to_path_buf());
@@ -441,7 +441,7 @@ async fn forward(stream: &mut Utf8Stream, bytes: &[u8], is_err: bool, tx: &mpsc:
 }
 
 /// Kills the process and everything it started (`go run`, `dotnet run` start children).
-async fn kill_tree(child: &mut Child) {
+pub(crate) async fn kill_tree(child: &mut Child) {
     if let Some(pid) = child.id() {
         #[cfg(windows)]
         {

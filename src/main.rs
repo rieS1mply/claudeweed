@@ -10,6 +10,8 @@ mod bot;
 mod config;
 mod logging;
 mod notes;
+mod agent;
+mod agent_text;
 mod runner;
 mod service;
 mod storage;
@@ -52,6 +54,7 @@ struct Args {
     autostart: Option<bool>,
     terminal: Option<bool>,
     runner: Option<bool>,
+    agent: Option<bool>,
     two_factor: Option<bool>,
     /// `Some(None)` = `--backup off`.
     backup: Option<Option<PathBuf>>,
@@ -79,6 +82,7 @@ local-photo — домашнее облако для фото и файлов
   --autostart on|off  запускать облако само при входе в систему (в фоне) / не запускать
   --terminal on|off   разрешить / запретить терминал этого компьютера на сайте
   --runner on|off     разрешить / запретить запуск кода на сайте (как онлайн-компилятор)
+  --agent on|off      разговор с Claude Code этого компьютера через Telegram-бота / выключить
   --2fa on|off        вход с кодом из приложения (Google Authenticator и др.) / без кода
   --backup <папка>    каждый день копировать хранилище в эту папку (лучше другой диск)
   --backup off        не делать резервную копию
@@ -95,7 +99,7 @@ local-photo — домашнее облако для фото и файлов
 fn parse_args() -> Result<Args> {
     let mut args = Args {
         dir: None, setup: false, no_tunnel: false, port: None, background: false, status: false, stop: false,
-        autostart: None, terminal: None, runner: None, two_factor: None, backup: None, backup_now: false, named_tunnel: None,
+        autostart: None, terminal: None, runner: None, agent: None, two_factor: None, backup: None, backup_now: false, named_tunnel: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -110,6 +114,7 @@ fn parse_args() -> Result<Args> {
             "--autostart" => args.autostart = Some(on_off(it.next(), "--autostart")?),
             "--terminal" => args.terminal = Some(on_off(it.next(), "--terminal")?),
             "--runner" => args.runner = Some(on_off(it.next(), "--runner")?),
+            "--agent" => args.agent = Some(on_off(it.next(), "--agent")?),
             "--2fa" => args.two_factor = Some(on_off(it.next(), "--2fa")?),
             "--backup" => {
                 let v = it.next().context("после --backup нужна папка или off")?;
@@ -185,6 +190,8 @@ async fn print_status(config_dir: &Path) -> Result<()> {
     println!("  Терминал:    {}", if terminal { "включён (--terminal off — выключить)" } else { "выключен" });
     let runner = config.as_ref().is_some_and(|c| c.runner);
     println!("  Запуск кода: {}", if runner { "включён (--runner off — выключить)" } else { "выключен (--runner on — включить)" });
+    let agent = config.as_ref().is_some_and(|c| c.agent);
+    println!("  Claude:      {}", if agent { "отвечает в Telegram (--agent off — выключить)" } else { "выключен (--agent on — разговор через Telegram)" });
     let two_factor = config.as_ref().is_some_and(|c| c.totp_secret.is_some());
     println!("  Вход:        {}", if two_factor { "пароль + код из приложения" } else { "только пароль (--2fa on — добавить код)" });
     let address = match config.as_ref().and_then(|c| c.named_tunnel.as_ref()) {
@@ -345,6 +352,29 @@ async fn run() -> Result<()> {
             println!("может выполнить любой код. Включите вход с кодом из приложения: local-photo --2fa on");
         } else {
             println!("Запуск кода выключен.");
+        }
+        return Ok(());
+    }
+    if let Some(on) = args.agent {
+        let mut config = Config::load(&config_file)?.context("сначала настройте облако: запустите программу без параметров")?;
+        if on && config.telegram.is_none() {
+            bail!("Claude отвечает через Telegram-бота, а он не подключён. Подключите: local-photo --setup");
+        }
+        config.agent = on;
+        config.save(&config_file)?;
+        // Read live by the running cloud, like the terminal setting.
+        if on {
+            println!("Claude включён: пишите боту обычным текстом, /help — команды.");
+            println!("Claude работает на этом компьютере с вашими правами: читает и меняет файлы, запускает команды.");
+            println!("Опасные действия он не выполняет сам (режим auto), но кто получит ваш Telegram — получит и");
+            println!("этот компьютер. Включите облачный пароль в Telegram: Настройки → Конфиденциальность.");
+            if runner::which("claude").is_none() {
+                println!();
+                println!("Внимание: Claude Code не найден. Установите его (https://claude.com/claude-code) и войдите: claude");
+            }
+            println!("Пока компьютер спит или выключен, Claude не отвечает: сообщения дождутся включения (до суток).");
+        } else {
+            println!("Claude в Telegram выключен. Если он сейчас работает — остановится в течение нескольких секунд.");
         }
         return Ok(());
     }

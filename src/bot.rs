@@ -1,5 +1,6 @@
 //! Telegram bot: photos, videos and files sent to the bot's chat land in the cloud,
-//! sorted like any upload. Only the owner's chat (from the setup) is listened to.
+//! sorted like any upload; text goes to Claude Code on this computer when that is turned on
+//! (`agent.rs`). Only the owner's chat (from the setup) is listened to.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,6 +9,7 @@ use anyhow::{bail, Result};
 use chrono::{Local, TimeZone};
 use serde_json::Value;
 
+use crate::agent::Agent;
 use crate::config::TelegramConfig;
 use crate::telegram;
 use crate::web::{self, App};
@@ -18,12 +20,36 @@ const BOT_DOWNLOAD_LIMIT: u64 = 20 * 1024 * 1024;
 /// The current public address, for the /url command.
 pub type PublicUrl = Arc<Mutex<Option<String>>>;
 
-const HELP: &str = "Отправьте сюда фото, видео или файлы — они сохранятся в облако и разложатся по датам.\n\n\
+const HELP: &str = "Отправьте сюда фото, видео или файлы — они сохранятся в облако и разложатся по датам.\n\
 Чтобы фото сохранилось в оригинальном качестве, отправляйте его «как файл» (без сжатия).\n\
 Telegram позволяет ботам скачивать файлы до 20 МБ — большие загружайте через сайт.\n\n\
+Обычный текст — это разговор с Claude на компьютере (если включён: local-photo --agent on). \
+Он может читать и менять файлы и запускать команды; подпись к файлу тоже уходит ему.\n\n\
+/new — начать новый разговор с Claude\n\
+/stop — прервать то, что Claude делает\n\
+/dir — папка, в которой работает Claude (/dir D:\\Проекты — сменить)\n\
+/status — что сейчас с Claude\n\
 /url — адрес облака";
 
+const COMMANDS: &[(&str, &str)] = &[
+    ("new", "Новый разговор с Claude"),
+    ("stop", "Прервать работу Claude"),
+    ("dir", "Папка, где работает Claude"),
+    ("status", "Что сейчас с Claude"),
+    ("url", "Адрес облака"),
+    ("help", "Что умеет бот"),
+];
+
 pub async fn run(app: App, tg: TelegramConfig, url: PublicUrl) {
+    let agent = Agent::start(tg.clone(), app.paths.config.clone());
+    {
+        let tg = tg.clone();
+        tokio::spawn(async move {
+            if let Err(e) = telegram::set_commands(&tg, COMMANDS).await {
+                crate::log!("Telegram-бот: меню команд не установлено: {e:#}");
+            }
+        });
+    }
     // Start from 0: anything sent while the computer was off (Telegram keeps it for a day) is picked up too.
     let mut offset = 0;
     loop {
@@ -31,7 +57,7 @@ pub async fn run(app: App, tg: TelegramConfig, url: PublicUrl) {
             Ok(updates) => {
                 for update in updates {
                     offset = offset.max(update["update_id"].as_i64().unwrap_or(0) + 1);
-                    handle(&app, &tg, &url, &update["message"]).await;
+                    handle(&app, &tg, &url, &agent, &update["message"]).await;
                 }
             }
             Err(e) => {
@@ -81,7 +107,7 @@ fn attachment(msg: &Value) -> Option<Attachment> {
     None
 }
 
-async fn handle(app: &App, tg: &TelegramConfig, url: &PublicUrl, msg: &Value) {
+async fn handle(app: &App, tg: &TelegramConfig, url: &PublicUrl, agent: &Arc<Agent>, msg: &Value) {
     // Strangers who find the bot are ignored.
     if msg["chat"]["id"].as_i64() != Some(tg.chat_id) {
         return;
@@ -89,12 +115,32 @@ async fn handle(app: &App, tg: &TelegramConfig, url: &PublicUrl, msg: &Value) {
     let msg_id = msg["message_id"].as_i64().unwrap_or(0);
 
     if let Some(text) = msg["text"].as_str() {
-        crate::log!("Telegram: команда/текст «{}»", text.chars().take(40).collect::<String>());
-        let answer = match text.split_whitespace().next().unwrap_or("") {
+        let (command, rest) = match text.trim().split_once(char::is_whitespace) {
+            Some((c, r)) => (c, r.trim()),
+            None => (text.trim(), ""),
+        };
+        if !command.starts_with('/') {
+            // The text itself stays out of the log: it is the owner's conversation.
+            return agent.ask(text.to_string(), msg_id).await;
+        }
+        crate::log!("Telegram: команда {}", command.chars().take(20).collect::<String>());
+        // "/dir@my_bot" in a menu tap: the bot's name is not part of the command.
+        let answer = match command.split('@').next().unwrap_or("") {
             "/url" | "/link" => match url.lock().unwrap().clone() {
                 Some(u) => format!("Облако: {u}"),
                 None => "Туннель ещё не открыт — адрес придёт, как только будет готов.".to_string(),
             },
+            "/new" => {
+                agent.new_conversation();
+                "🆕 Следующее сообщение начнёт новый разговор с Claude.".to_string()
+            }
+            "/stop" => if agent.stop() { "⏹ Останавливаю." } else { "Claude сейчас ничего не делает." }.to_string(),
+            "/dir" if rest.is_empty() => format!("Claude работает в папке:\n{}", agent.dir().display()),
+            "/dir" => match agent.set_dir(rest) {
+                Ok(dir) => format!("📁 Теперь Claude работает в папке:\n{}", dir.display()),
+                Err(e) => e,
+            },
+            "/status" => agent.status(),
             _ => HELP.to_string(),
         };
         let _ = telegram::reply(tg, msg_id, &answer).await;
@@ -107,6 +153,7 @@ async fn handle(app: &App, tg: &TelegramConfig, url: &PublicUrl, msg: &Value) {
         return;
     };
     crate::log!("Telegram: получен «{}» ({} КБ), скачиваю…", att.name, att.size / 1024);
+    let mut saved = None;
     let text = match save(app, tg, msg, &att).await {
         Ok((section, rel)) => {
             crate::log!("Telegram → {}/{rel}", section.dir_name());
@@ -114,6 +161,7 @@ async fn handle(app: &App, tg: &TelegramConfig, url: &PublicUrl, msg: &Value) {
             if att.compressed {
                 t.push_str("\n\nTelegram сжал это фото. Для оригинала отправляйте «как файл».");
             }
+            saved = Some(app.section_root(section).join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)));
             t
         }
         Err(e) => {
@@ -122,6 +170,15 @@ async fn handle(app: &App, tg: &TelegramConfig, url: &PublicUrl, msg: &Value) {
         }
     };
     let _ = telegram::reply(tg, msg_id, &text).await;
+
+    // A file with a caption is a question about it: Claude gets the caption and where the file is.
+    let caption = msg["caption"].as_str().map(str::trim).unwrap_or_default();
+    if let (Some(path), false) = (saved, caption.is_empty()) {
+        if agent.enabled() {
+            let prompt = format!("[Владелец прислал файл, он сохранён здесь: {}]\n\n{caption}", path.display());
+            agent.ask(prompt, msg_id).await;
+        }
+    }
 }
 
 async fn save(app: &App, tg: &TelegramConfig, msg: &Value, att: &Attachment) -> Result<(crate::storage::Section, String)> {

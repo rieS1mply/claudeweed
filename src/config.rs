@@ -128,6 +128,9 @@ pub struct Config {
     /// Running code files from the site (`--runner on`): executes anything, like the terminal.
     #[serde(default)]
     pub runner: bool,
+    /// Chat with Claude Code through the Telegram bot (`--agent on`): it acts on this computer.
+    #[serde(default)]
+    pub agent: bool,
     /// Base32 secret of the authenticator app (`--2fa on`); login then also asks for its code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub totp_secret: Option<String>,
@@ -424,6 +427,7 @@ pub async fn setup(path: &Path, previous: Option<&Config>, suggestion: Option<&P
         terminal,
         // Re-running setup changes the login, not these (each has its own command).
         runner: previous.is_some_and(|c| c.runner),
+        agent: previous.is_some_and(|c| c.agent),
         totp_secret: previous.and_then(|c| c.totp_secret.clone()),
         backup_dir: previous.and_then(|c| c.backup_dir.clone()),
         named_tunnel: previous.and_then(|c| c.named_tunnel.clone()),
@@ -497,7 +501,7 @@ mod tests {
         let old_system = base.join(SYSTEM_DIR);
         std::fs::create_dir_all(old_system.join("trash/abc")).unwrap();
         std::fs::create_dir_all(base.join(LEGACY_STORAGE_DIR).join("Фото")).unwrap();
-        let cfg = Config { storage_dir: None, username: "u".into(), password_hash: "h".into(), port: 1, telegram: None, terminal: false, runner: false, totp_secret: None, backup_dir: None, named_tunnel: None };
+        let cfg = Config { storage_dir: None, username: "u".into(), password_hash: "h".into(), port: 1, telegram: None, terminal: false, runner: false, agent: false, totp_secret: None, backup_dir: None, named_tunnel: None };
         cfg.save(&old_system.join(CONFIG_FILE)).unwrap();
         let config_dir = base.join("settings");
 

@@ -77,7 +77,8 @@ local-photo.exe), `--stop` убьёт и терминал, и самого Claud
 | `src/config.rs` | папки, `config.json`, интерактивная первая настройка |
 | `src/service.rs` | автозапуск (Windows Run / launchd / systemd), `status.json`, `--stop` |
 | `src/tunnel.rs` | скачивание и перезапуск cloudflared: быстрый туннель или именованный (`--tunnel named`), фильтр повторяющихся ошибок |
-| `src/telegram.rs`, `src/bot.rs` | Bot API и приём файлов из чата владельца |
+| `src/telegram.rs`, `src/bot.rs` | Bot API, приём файлов из чата владельца, команды бота |
+| `src/agent.rs`, `src/agent_text.rs` | Claude в Telegram (`--agent on`): текст владельца → `claude -p --permission-mode auto --resume <id>` (stream-json), шаги в обновляемом сообщении, очередь, `/stop`, `/new`, `/dir`; разговор и папка в `agent.json`. `agent_text` — Markdown → HTML Telegram, разбиение на части, подписи к шагам |
 | `src/terminal.rs` | до 8 именованных PTY-сеансов (ConPTY на Windows), история, deflate-сжатие вывода; REST `/api/terminal/sessions` + WebSocket `/api/terminal?id=N` |
 | `src/terminal_store.rs` | сеансы переживают перезапуск: раз в 15 с пишутся в `<настройки>/terminal/` (имя, папка, вывод, запущенный Claude); при старте оболочки возвращаются, в них вводится `claude --resume <id>`. Папку PowerShell сообщает своим приглашением (OSC 7). Убирает переменные `CLAUDE_CODE_*` из окружения оболочек |
 | `src/runner.rs` | запуск кода (как онлайн-компилятор): таблица `LANGS`, поиск инструментов `which`, лимиты, NDJSON-поток `/api/run`, `/api/run/langs` |
@@ -97,8 +98,10 @@ local-photo.exe), `--stop` убьёт и терминал, и самого Claud
 - Удаление = перенос в корзину, не `remove_file`.
 - Тяжёлая работа с диском/картинками — в `spawn_blocking`; размещение файлов под `place_lock`.
 - CSP запрещает inline-скрипты и стили (кроме страницы терминала): никаких `onclick=""` и `<style>` в HTML.
-- Терминал и запуск кода включает только владелец на самом компьютере (`--terminal on`,
-  `--runner on`), не код и не агент.
+- Терминал, запуск кода и Claude в Telegram включает только владелец на самом компьютере
+  (`--terminal on`, `--runner on`, `--agent on`), не код и не агент.
+- Бот слушает только чат владельца (`chat_id` из настройки); текст разговора с Claude не
+  писать в журнал.
 - Новый язык для запуска: строка в `LANGS` (`src/runner.rs`), расширение в `RUN_LANG`,
   подсветка в `RUN_HL` и шаблон в `RUN_TEMPLATES` (`static/runner.js`). Шаблон должен
   печатать «Привет из облака!», «Ввод: …» и «2 + 3 = 5» — так его проверяет тест-скрипт.

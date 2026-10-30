@@ -84,7 +84,7 @@ impl AppState {
         })
     }
 
-    fn section_root(&self, section: Section) -> PathBuf {
+    pub fn section_root(&self, section: Section) -> PathBuf {
         self.paths.storage.join(section.dir_name())
     }
 
