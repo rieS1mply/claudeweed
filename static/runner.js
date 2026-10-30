@@ -93,8 +93,8 @@ function hidePanel() {
 function setRunButton(running) {
   const btn = $('#code-run');
   btn.classList.toggle('stop', running);
-  btn.title = running ? 'Остановить (Ctrl+Enter)' : 'Запустить (Ctrl+Enter)';
-  btn.querySelector('span').textContent = running ? 'Стоп' : 'Запустить';
+  btn.title = running ? t('Остановить (Ctrl+Enter)') : t('Запустить (Ctrl+Enter)');
+  btn.querySelector('span').textContent = running ? t('Стоп') : t('Запустить');
   btn.querySelector('path').setAttribute('d', running ? 'M7 7h10v10H7z' : 'M7 4v16l13-8z');
 }
 
@@ -120,14 +120,14 @@ function appendOut(text, kind) {
 }
 
 const EXIT_TEXT = {
-  timeout: 'Превышено время — программа остановлена',
-  limit: 'Слишком много вывода — программа остановлена',
-  compile: 'Ошибка компиляции',
-  stopped: 'Остановлено',
-  error: 'Не запущено',
+  timeout: t('Превышено время — программа остановлена'),
+  limit: t('Слишком много вывода — программа остановлена'),
+  compile: t('Ошибка компиляции'),
+  stopped: t('Остановлено'),
+  error: t('Не запущено'),
 };
 
-function fmtMs(ms) { return ms < 1000 ? `${ms} мс` : `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)} с`; }
+function fmtMs(ms) { return ms < 1000 ? t('{0} мс', { 0: ms }) : t('{0} с', { 0: (ms / 1000).toFixed(ms < 10_000 ? 2 : 1) }); }
 
 // ---------- running ----------
 
@@ -139,14 +139,14 @@ async function runCode() {
   $('#run-out').replaceChildren();
   run.outChars = 0;
   if (info && !info.available) {
-    setRunStatus(`${info.name} не установлен`, 'error');
-    appendOut(`${info.name} не найден на компьютере.\n${info.hint}\n\nПосле установки обновите страницу.`, 'info');
+    setRunStatus(t('{0} не установлен', { 0: info.name }), 'error');
+    appendOut(t('{0} не найден на компьютере.\n{1}\n\nПосле установки обновите страницу.', { 0: info.name, 1: info.hint }), 'info');
     return;
   }
   const ctrl = new AbortController();
   run.ctrl = ctrl;
   setRunButton(true);
-  setRunStatus('Запуск…', 'busy');
+  setRunStatus(t('Запуск…'), 'busy');
   const started = performance.now();
   let finished = false;
   try {
@@ -155,10 +155,10 @@ async function runCode() {
       headers: { 'X-Cloud': '1', 'Content-Type': 'application/json' },
       body: JSON.stringify({ lang: run.lang, code: $('#doc-text').value, stdin: stdinText() }),
     });
-    if (res.status === 401) { showLogin(); throw new Error('Требуется вход'); }
+    if (res.status === 401) { showLogin(); throw new Error(t('Требуется вход')); }
     if (!res.ok) {
       const data = await res.json().catch(() => null);
-      throw new Error(data?.error || `Ошибка ${res.status}`);
+      throw new Error(tServer(data?.error) || t('Ошибка {0}', { 0: res.status }));
     }
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -174,11 +174,11 @@ async function runCode() {
         if (line) finished = onRunEvent(JSON.parse(line)) || finished;
       }
     }
-    if (!finished) setRunStatus('Соединение прервалось', 'error');
+    if (!finished) setRunStatus(t('Соединение прервалось'), 'error');
   } catch (e) {
     if (e.name === 'AbortError') {
-      setRunStatus(`Остановлено · ${fmtMs(Math.round(performance.now() - started))}`, 'error');
-      appendOut('\n[остановлено]\n', 'info');
+      setRunStatus(t('Остановлено · {0}', { 0: fmtMs(Math.round(performance.now() - started)) }), 'error');
+      appendOut(t('\n[остановлено]\n'), 'info');
     } else {
       setRunStatus(e.message, 'error');
     }
@@ -191,7 +191,7 @@ async function runCode() {
 /** True for the final event. */
 function onRunEvent(ev) {
   if (ev.t === 'phase') {
-    setRunStatus(ev.v === 'compile' ? 'Компиляция…' : 'Работает…', 'busy');
+    setRunStatus(ev.v === 'compile' ? t('Компиляция…') : t('Работает…'), 'busy');
     if (ev.v === 'run' && $('#run-out').childNodes.length) appendOut('\n', 'info');
   } else if (ev.t === 'out') {
     appendOut(ev.v, 'out');
@@ -200,8 +200,8 @@ function onRunEvent(ev) {
   } else if (ev.t === 'exit') {
     const time = fmtMs(ev.ms);
     if (ev.reason) setRunStatus(`${EXIT_TEXT[ev.reason] || ev.reason} · ${time}`, 'error');
-    else setRunStatus(`Готово · код ${ev.code ?? '?'} · ${time}`, ev.code === 0 ? 'ok' : 'error');
-    if (!$('#run-out').childNodes.length) appendOut('(программа ничего не вывела)', 'info');
+    else setRunStatus(t('Готово · код {0} · {1}', { 0: ev.code ?? '?', 1: time }), ev.code === 0 ? 'ok' : 'error');
+    if (!$('#run-out').childNodes.length) appendOut(t('(программа ничего не вывела)'), 'info');
     return true;
   }
   return false;
@@ -257,13 +257,13 @@ function bindPanelResize() {
 
 function resetExpand() {
   $('#run-expand').textContent = '⤢';
-  $('#run-expand').title = 'Развернуть';
+  $('#run-expand').title = t('Развернуть');
 }
 
 function toggleFull() {
   const full = $('#doc').classList.toggle('run-full');
   $('#run-expand').textContent = full ? '⤡' : '⤢';
-  $('#run-expand').title = full ? 'Свернуть' : 'Развернуть';
+  $('#run-expand').title = full ? t('Свернуть') : t('Развернуть');
 }
 
 // ---------- phone: symbols over the keyboard ----------
@@ -313,20 +313,20 @@ async function openPlayground() {
     try { langs = await loadRunLangs(); } catch (e) { return toast(e.message); }
   }
   const actions = langs.map((l) => ({
-    label: l.available ? l.name : `${l.name} — не установлен`,
+    label: l.available ? l.name : t('{0} — не установлен', { 0: l.name }),
     hint: l.available ? (l.version || '') : l.hint,
     run: () => (l.available ? startPlayground(l) : toast(l.hint)),
   }));
-  actions.push({ label: 'Обновить список (после установки)', run: async () => { await loadRunLangs(true).catch(() => {}); openPlayground(); } });
-  actionSheet('Новый код — выберите язык', actions);
+  actions.push({ label: t('Обновить список (после установки)'), run: async () => { await loadRunLangs(true).catch(() => {}); openPlayground(); } });
+  actionSheet(t('Новый код — выберите язык'), actions);
 }
 
 async function startPlayground(lang) {
   let saved = null;   // { section, item } once saved to Files
   let original = null;
   const code = RUN_TEMPLATES[lang.id] || '';
-  const save = el('button', { class: 'doc-btn strong', text: 'В Файлы', 'data-save': '1' });
-  const title = () => saved ? saved.item.name : `${lang.file} · черновик`;
+  const save = el('button', { class: 'doc-btn strong', text: t('В Файлы'), 'data-save': '1' });
+  const title = () => saved ? saved.item.name : t('{0} · черновик', { 0: lang.file });
   save.onclick = async () => {
     const text = $('#doc-text').value;
     save.disabled = true;
@@ -334,15 +334,15 @@ async function startPlayground(lang) {
       if (saved) {
         await api.replace('files', saved.item, new Blob([text], { type: 'text/plain' }), false);
       } else {
-        const name = await promptDialog('Сохранить в «Файлы» как', lang.file.replace(/^Main\./, 'main.'), { ok: 'Сохранить', selectStem: true });
+        const name = await promptDialog(t('Сохранить в «Файлы» как'), lang.file.replace(/^Main\./, 'main.'), { ok: t('Сохранить'), selectStem: true });
         if (!name) { save.disabled = false; return; }
         const res = await api.upload(new File([text], name, { type: 'text/plain' }), () => {});
         saved = { item: { name: res.path.split('/').pop(), path: res.path, size: text.length } };
-        save.textContent = 'Сохранить';
+        save.textContent = t('Сохранить');
         $('#doc-title').textContent = title();
       }
       original = text;
-      $('#doc-status').textContent = 'Сохранено';
+      $('#doc-status').textContent = t('Сохранено');
       load('files');
     } catch (e) {
       save.disabled = false;
@@ -352,15 +352,15 @@ async function startPlayground(lang) {
   doc.runLang = lang.id;   // runnerOnOpen picks it up: a draft has no file name yet
   await openDocView({
     title: title(), text: code, mono: true, lang: RUN_HL[lang.id], file: lang.file,
-    left: 'Закрыть', right: [save], slide: 'up',
+    left: t('Закрыть'), right: [save], slide: 'up',
     onInput: (v) => {
       save.disabled = saved ? v === original : false;
-      $('#doc-status').textContent = saved && v !== original ? 'Изменено' : '';
+      $('#doc-status').textContent = saved && v !== original ? t('Изменено') : '';
     },
     onClose: async () => {
       const text = $('#doc-text').value;
       const unsaved = saved ? text !== original : text !== code;
-      if (unsaved && !(await confirmDialog(saved ? 'Изменения не сохранены.' : 'Черновик не сохранён в «Файлы».', { title: 'Закрыть?', ok: 'Закрыть' }))) return;
+      if (unsaved && !(await confirmDialog(saved ? t('Изменения не сохранены.') : t('Черновик не сохранён в «Файлы».'), { title: t('Закрыть?'), ok: t('Закрыть') }))) return;
       closeDocView();
     },
   });
@@ -388,7 +388,7 @@ function bindRunner() {
   // Keep the keyboard open: buttons must not take the focus away from the text.
   const bar = $('#sym-bar');
   for (const sym of SYMBOLS) {
-    const b = el('button', { type: 'button', class: 'sym', text: sym, title: sym === '⇥' ? 'Отступ' : sym });
+    const b = el('button', { type: 'button', class: 'sym', text: sym, title: sym === '⇥' ? t('Отступ') : sym });
     b.addEventListener('pointerdown', (e) => e.preventDefault());
     b.addEventListener('click', () => insertSymbol(sym));
     bar.append(b);

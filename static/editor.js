@@ -5,14 +5,14 @@
 // ---------- photo editor ----------
 
 const ADJUSTMENTS = [
-  { key: 'brightness', label: 'Яркость' },
-  { key: 'contrast', label: 'Контраст' },
-  { key: 'saturation', label: 'Насыщенность' },
-  { key: 'warmth', label: 'Теплота' },
+  { key: 'brightness', label: t('Яркость') },
+  { key: 'contrast', label: t('Контраст') },
+  { key: 'saturation', label: t('Насыщенность') },
+  { key: 'warmth', label: t('Теплота') },
 ];
 const ASPECTS = [
-  { label: 'Свободно', value: null },
-  { label: 'Оригинал', value: 'original' },
+  { label: t('Свободно'), value: null },
+  { label: t('Оригинал'), value: 'original' },
   { label: '1:1', value: 1 },
   { label: '4:3', value: 4 / 3 },
   { label: '3:4', value: 3 / 4 },
@@ -38,7 +38,7 @@ function loadImage(url) {
     const img = new Image();
     img.decoding = 'async';
     img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error('Браузер не может открыть этот формат'));
+    img.onerror = () => reject(new Error(t('Браузер не может открыть этот формат')));
     img.src = url;
   });
 }
@@ -329,11 +329,11 @@ async function saveMenu() {
   const shrinks = ed.crop.w * RW * ed.crop.h * RH > MAX_PIXELS;
   // Overwriting would lose detail if the browser has to scale the photo down (iPhone limit).
   const canReplace = Boolean(ENCODABLE[ext]) && !shrinks;
-  const note = shrinks ? 'Фото слишком большое для этого браузера — сохранится уменьшенная копия, оригинал не тронется'
-    : canReplace ? '' : 'Этот формат браузер сохранить не может — будет создана копия в JPG';
+  const note = shrinks ? t('Фото слишком большое для этого браузера — сохранится уменьшенная копия, оригинал не тронется')
+    : canReplace ? '' : t('Этот формат браузер сохранить не может — будет создана копия в JPG');
   await actionSheet(note, [
-    canReplace && { label: 'Сохранить', hint: 'оригинал уйдёт в корзину', run: () => saveEdit(false) },
-    { label: 'Сохранить как копию', run: () => saveEdit(true) },
+    canReplace && { label: t('Сохранить'), hint: t('оригинал уйдёт в корзину'), run: () => saveEdit(false) },
+    { label: t('Сохранить как копию'), run: () => saveEdit(true) },
   ]);
 }
 
@@ -350,7 +350,7 @@ async function renderFull(mime) {
   drawTransformed(ctx, img, ed.crop, outW, outH);
   applyAdjustments(ctx, outW, outH);
   const blob = await new Promise((r) => canvas.toBlob(r, mime, 0.9));
-  if (!blob) throw new Error('Не удалось подготовить изображение');
+  if (!blob) throw new Error(t('Не удалось подготовить изображение'));
   // Safari silently writes PNG when asked for WebP: trust the blob, not the request.
   return { blob, ext: EXT_OF_MIME[blob.type] || 'png' };
 }
@@ -361,16 +361,16 @@ async function saveEdit(asCopy) {
   const mime = ENCODABLE[ext] || 'image/jpeg';
   const done = $('#ed-done');
   done.disabled = true;
-  done.textContent = 'Сохранение…';
+  done.textContent = t('Сохранение…');
   try {
     const { blob, ext: outExt } = await renderFull(mime);
     const sameFormat = ENCODABLE[outExt] === ENCODABLE[ext];
     if (asCopy || !sameFormat) {
-      await api.copy(section, item, `${stem} (ред.).${sameFormat ? ext : outExt}`, blob);
-      toast('Копия сохранена');
+      await api.copy(section, item, `${stem} (${t('ред.')}).${sameFormat ? ext : outExt}`, blob);
+      toast(t('Копия сохранена'));
     } else {
       await api.replace(section, item, blob, true);
-      toast('Сохранено. Оригинал — в корзине', {});
+      toast(t('Сохранено. Оригинал — в корзине'), {});
     }
     await closeEditor();
     state.data.trash = null;
@@ -380,7 +380,7 @@ async function saveEdit(asCopy) {
     toast(e.message);
   } finally {
     done.disabled = false;
-    done.textContent = 'Готово';
+    done.textContent = t('Готово');
   }
 }
 
@@ -401,19 +401,19 @@ function conversionsFor(section, item) {
   const ext = splitName(item.name)[1];
   if (CONVERTIBLE_IMAGES.includes(ext)) {
     const same = ext === 'jpeg' ? 'jpg' : ext;
-    return IMAGE_TARGETS.filter((t) => t.ext !== same).map((t) => ({
-      label: `Конвертировать в ${t.label}`,
+    return IMAGE_TARGETS.filter((tg) => tg.ext !== same).map((tg) => ({
+      label: t('Конвертировать в {0}', { 0: tg.label }),
       // PNG stores every pixel without loss: a camera photo becomes several times bigger.
-      hint: t.ext === 'png' && LOSSY_SOURCES.includes(ext) ? 'без сжатия — файл станет в несколько раз больше' : '',
-      run: () => convertImage(section, item, t),
+      hint: tg.ext === 'png' && LOSSY_SOURCES.includes(ext) ? t('без сжатия — файл станет в несколько раз больше') : '',
+      run: () => convertImage(section, item, tg),
     }));
   }
   const text = { csv: [['json', 'JSON']], json: [['csv', 'CSV']], txt: [['md', 'Markdown']], md: [['txt', 'TXT']] }[ext] || [];
-  return text.map(([to, label]) => ({ label: `Конвертировать в ${label}`, run: () => convertText(section, item, to) }));
+  return text.map(([to, label]) => ({ label: t('Конвертировать в {0}', { 0: label }), run: () => convertText(section, item, to) }));
 }
 
 async function convertImage(section, item, target) {
-  toast(`Конвертирую в ${target.label}…`);
+  toast(t('Конвертирую в {0}…', { 0: target.label }));
   try {
     const img = await loadImage(section === 'photos' ? viewerUrl(item) : api.fileUrl(section, item, false));
     const [w, h] = fitPixels(img.naturalWidth, img.naturalHeight);
@@ -424,9 +424,9 @@ async function convertImage(section, item, target) {
     if (target.mime === 'image/jpeg') { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); }  // JPG has no transparency
     ctx.drawImage(img, 0, 0, w, h);
     const blob = await new Promise((r) => canvas.toBlob(r, target.mime, LOSSY_QUALITY));
-    if (!blob || blob.type !== target.mime) throw new Error(`Этот браузер не умеет сохранять ${target.label}`);
+    if (!blob || blob.type !== target.mime) throw new Error(t('Этот браузер не умеет сохранять {0}', { 0: target.label }));
     await api.copy(section, item, `${splitName(item.name)[0]}.${target.ext}`, blob);
-    toast(`Готово: ${target.label} · ${fmtSize(blob.size)} (было ${fmtSize(item.size)})`);
+    toast(t('Готово: {0} · {1} (было {2})', { 0: target.label, 1: fmtSize(blob.size), 2: fmtSize(item.size) }));
     await load(section);
   } catch (e) {
     toast(e.message);
@@ -483,10 +483,10 @@ async function convertText(section, item, to) {
     const out = from === 'csv' && to === 'json' ? csvToJson(text) : from === 'json' && to === 'csv' ? jsonToCsv(text) : text;
     const type = { json: 'application/json', csv: 'text/csv', md: 'text/markdown', txt: 'text/plain' }[to];
     await api.copy(section, item, `${splitName(item.name)[0]}.${to}`, new Blob([out], { type }));
-    toast(`Готово: ${to.toUpperCase()}`);
+    toast(t('Готово: {0}', { 0: to.toUpperCase() }));
     await load(section);
   } catch (e) {
-    toast(e instanceof SyntaxError ? 'Не получилось прочитать JSON' : e.message);
+    toast(e instanceof SyntaxError ? t('Не получилось прочитать JSON') : e.message);
   }
 }
 
@@ -580,7 +580,7 @@ function setCodeMode(on, text) {
   lockZoom(true);
   area.setSelectionRange(0, 0);   // code opens at the top, not with the caret at the end
   doc.indent = detectIndent(text);
-  $('#code-lang').textContent = 'Текст';
+  $('#code-lang').textContent = t('Текст');
   applyCodePrefs();
   renderCode();
   if (doc.lang && text.length <= MAX_HIGHLIGHT) {
@@ -705,7 +705,7 @@ function renderFindMarks() {
   layer.innerHTML = `${html}${esc(text.slice(pos))}\n`;
   const n = finder.matches.length;
   $('#find-count').textContent = !$('#find-input').value ? ''
-    : n ? `${finder.cur + 1} из ${n}${n >= MAX_MATCHES ? '+' : ''}` : 'нет';
+    : n ? t('{0} из {1}', { 0: finder.cur + 1, 1: `${n}${n >= MAX_MATCHES ? '+' : ''}` }) : t('нет');
 }
 
 /** Scrolls the textarea so the current match sits a third of the way down, and selects it. */
@@ -799,7 +799,7 @@ function replaceAll() {
   insertText(area, out);
   area.setSelectionRange(0, 0);
   updateMatches(0);
-  toast(`Заменено: ${n}`);
+  toast(t('Заменено: {0}', { 0: n }));
   $('#replace-input').focus();
 }
 
@@ -843,7 +843,7 @@ function updateCursorPos() {
   const line = before.split('\n').length;
   const col = before.length - before.lastIndexOf('\n');
   const sel = area.selectionEnd - area.selectionStart;
-  $('#code-pos').textContent = `Стр ${line}, кол ${col}${sel ? ` · выделено ${sel}` : ''}`;
+  $('#code-pos').textContent = t('Стр {0}, кол {1}', { 0: line, 1: col }) + (sel ? ` · ${t('выделено {0}', { 0: sel })}` : '');
 }
 
 /** Inserts text keeping the browser's undo history. */
@@ -891,7 +891,7 @@ function newlineWithIndent(area) {
 async function goToLine() {
   const area = $('#doc-text');
   const total = area.value.split('\n').length;
-  const answer = await promptDialog(`Перейти к строке (1–${total})`, '', { ok: 'Перейти' });
+  const answer = await promptDialog(t('Перейти к строке (1–{0})', { 0: total }), '', { ok: t('Перейти') });
   const n = parseInt(answer, 10);
   if (!n) return;
   const lines = area.value.split('\n');
@@ -960,10 +960,10 @@ async function showVersions(section, item) {
   } catch (e) {
     return toast(e.message);
   }
-  if (!items.length) return toast('Прошлых версий нет: они появляются после сохранения');
-  const pick = (v) => actionSheet(`Версия до ${fmtDate(v.saved_at)}`, [
+  if (!items.length) return toast(t('Прошлых версий нет: они появляются после сохранения'));
+  const pick = (v) => actionSheet(t('Версия до {0}', { 0: fmtDate(v.saved_at) }), [
     {
-      label: 'Открыть в редакторе', hint: 'текст заменится, сохранить — кнопкой «Сохранить»',
+      label: t('Открыть в редакторе'), hint: t('текст заменится, сохранить — кнопкой «Сохранить»'),
       run: async () => {
         try {
           const text = await api.versionText(v.id);
@@ -973,21 +973,21 @@ async function showVersions(section, item) {
           insertText(area, text);   // one undo step back to the current text
           area.setSelectionRange(0, 0);
           area.scrollTop = 0;
-          toast('Версия загружена — Ctrl+Z вернёт текущий текст');
+          toast(t('Версия загружена — Ctrl+Z вернёт текущий текст'));
         } catch (e) {
           toast(e.message);
         }
       },
     },
-    { label: 'Скачать', run: () => triggerDownload(`/api/trash/${v.id}/file`, item.name) },
+    { label: t('Скачать'), run: () => triggerDownload(`/api/trash/${v.id}/file`, item.name) },
   ]);
-  actionSheet(`История: ${item.name}`, items.map((v) => ({
-    label: `До ${fmtDate(v.saved_at)}`, hint: fmtSize(v.size), run: () => pick(v),
+  actionSheet(t('История: {0}', { 0: item.name }), items.map((v) => ({
+    label: t('До {0}', { 0: fmtDate(v.saved_at) }), hint: fmtSize(v.size), run: () => pick(v),
   })));
 }
 
 async function openTextEditor(section, item) {
-  if (item.size > MAX_TEXT_EDIT) return toast('Файл слишком большой для редактора — скачайте его');
+  if (item.size > MAX_TEXT_EDIT) return toast(t('Файл слишком большой для редактора — скачайте его'));
   let original;
   try {
     original = await api.readText(section, item);
@@ -995,31 +995,31 @@ async function openTextEditor(section, item) {
     return toast(e.message);
   }
   let current = original;
-  const save = el('button', { class: 'doc-btn strong', text: 'Сохранить', 'data-save': '1', disabled: true });
+  const save = el('button', { class: 'doc-btn strong', text: t('Сохранить'), 'data-save': '1', disabled: true });
   save.onclick = async () => {
     save.disabled = true;
     try {
       // The text before this save stays in the file's history for 30 days.
       await api.replace(section, item, new Blob([current], { type: 'text/plain' }), 'version');
       original = current;
-      $('#doc-status').textContent = 'Сохранено';
+      $('#doc-status').textContent = t('Сохранено');
       load(section);
     } catch (e) {
       save.disabled = false;
       toast(e.message);
     }
   };
-  const history = el('button', { class: 'doc-btn', text: 'История', title: 'Прошлые версии файла', onclick: () => showVersions(section, item) });
+  const history = el('button', { class: 'doc-btn', text: t('История'), title: t('Прошлые версии файла'), onclick: () => showVersions(section, item) });
   await openDocView({
     title: item.name, text: original, mono: true, lang: CODE_LANG[splitName(item.name)[1]] || null, file: item.name,
-    left: 'Закрыть', right: [history, save], slide: 'up',
+    left: t('Закрыть'), right: [history, save], slide: 'up',
     onInput: (v) => {
       current = v;
       save.disabled = v === original;
-      $('#doc-status').textContent = v === original ? '' : 'Изменено';
+      $('#doc-status').textContent = v === original ? '' : t('Изменено');
     },
     onClose: async () => {
-      if (current !== original && !(await confirmDialog('Изменения не сохранены.', { title: 'Закрыть без сохранения?', ok: 'Закрыть' }))) return;
+      if (current !== original && !(await confirmDialog(t('Изменения не сохранены.'), { title: t('Закрыть без сохранения?'), ok: t('Закрыть') }))) return;
       closeDocView();
     },
   });

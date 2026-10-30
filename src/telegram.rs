@@ -169,6 +169,7 @@ pub async fn send(tg: &TelegramConfig, text: &str) -> Result<()> {
 
 /// Like [`send`], but retries for a while — at boot the network may not be up yet.
 pub async fn send_with_retry(tg: &TelegramConfig, text: &str) {
+    let text = &crate::i18n::tr(text);
     for attempt in 1..=6u64 {
         match send(tg, text).await {
             Ok(()) => return,

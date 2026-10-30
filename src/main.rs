@@ -8,6 +8,8 @@ mod auth;
 mod backup;
 mod bot;
 mod config;
+mod i18n;
+mod lang_en;
 mod logging;
 mod notes;
 mod agent;
@@ -104,6 +106,34 @@ local-photo — домашнее облако для фото и файлов
   -h, --help          эта справка
 ";
 
+const HELP_EN: &str = "\
+local-photo — a home cloud for photos and files
+
+Usage: local-photo [options]
+
+  (no options)        start the cloud (the first start runs the setup)
+  --status            is the cloud running, and at what address
+  --stop              stop the cloud running in the background
+  --autostart on|off  start the cloud by itself at login (in the background) / don't
+  --terminal on|off   allow / forbid this computer's terminal on the site
+  --runner on|off     allow / forbid running code on the site (like an online compiler)
+  --agent on|off      chat with this computer's Claude Code through the Telegram bot / off
+  --2fa on|off        log in with a code from an app (Google Authenticator etc.) / without
+  --backup <folder>   copy the storage to this folder every day (another disk is better)
+  --backup off        no backup
+  --backup-now        make a backup right now
+  --tunnel named      permanent address: a Cloudflare tunnel on your domain (asks for the token)
+  --tunnel quick      back to a random trycloudflare.com address (no account)
+  --upload-token new  key for automatic uploads from an iPhone (Shortcuts), see README
+  --upload-token off  turn automatic uploads off
+  --lang ru|en        language of Telegram messages and the console
+  --setup             choose the storage folder, set the login, password and Telegram again
+  --port <port>       local port (8787 by default)
+  --no-tunnel         don't open access from the internet (only http://127.0.0.1)
+  --dir <folder>      keep the settings in this folder (portable/test install)
+  -h, --help          this help
+";
+
 fn parse_args() -> Result<Args> {
     let mut args = Args {
         dir: None, setup: false, no_tunnel: false, port: None, background: false, status: false, stop: false,
@@ -152,10 +182,10 @@ fn parse_args() -> Result<Args> {
                 args.lang = Some(v);
             }
             "-h" | "--help" => {
-                print!("{HELP}");
+                print!("{}", if i18n::english() { HELP_EN } else { HELP });
                 std::process::exit(0);
             }
-            other => bail!("неизвестный параметр {other}\n\n{HELP}"),
+            other => bail!("неизвестный параметр {other}. Справка: local-photo --help"),
         }
     }
     Ok(args)
@@ -169,7 +199,8 @@ fn exe_dir() -> Option<PathBuf> {
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
-        eprintln!("Ошибка: {e:#}");
+        let chain: Vec<String> = e.chain().map(|c| i18n::tr(&c.to_string())).collect();
+        eprintln!("{}: {}", i18n::tr("Ошибка"), chain.join(": "));
         logging::line(&format!("Ошибка: {e:#}"));
         // Keep the window open when started by double-click on Windows.
         service::pause_if_own_window();
@@ -179,63 +210,63 @@ async fn main() {
 
 /// The address, big enough to notice, plus a QR code for the phone camera.
 fn show_url(url: &str) {
-    println!();
-    println!("  ===============================================================");
-    println!("   Облако доступно по адресу:  {url}");
-    println!("  ===============================================================");
+    crate::say!();
+    crate::say!("  ===============================================================");
+    crate::say!("   Облако доступно по адресу:  {url}");
+    crate::say!("  ===============================================================");
     if let Some(qr) = service::qr(url) {
-        println!("   Наведите камеру телефона, чтобы открыть:");
+        crate::say!("   Наведите камеру телефона, чтобы открыть:");
         for line in qr.lines() {
-            println!("   {line}");
+            crate::say!("   {line}");
         }
     }
-    println!();
+    crate::say!();
 }
 
 async fn print_status(config_dir: &Path) -> Result<()> {
     let autostart = if service::autostart_enabled() { "включён" } else { "выключен" };
     match service::running(config_dir).await {
         Some(st) => {
-            println!("Облако работает.");
+            crate::say!("Облако работает.");
             match &st.url {
                 Some(url) => show_url(url),
-                None if !st.tunnel => println!("  Без туннеля: доступно только с этого компьютера."),
-                None => println!("  Туннель ещё открывается — адрес появится через минуту."),
+                None if !st.tunnel => crate::say!("  Без туннеля: доступно только с этого компьютера."),
+                None => crate::say!("  Туннель ещё открывается — адрес появится через минуту."),
             }
-            println!("  Хранилище:   {}", st.storage.display());
-            println!("  Локально:    http://127.0.0.1:{}", st.port);
+            crate::say!("  Хранилище:   {}", st.storage.display());
+            crate::say!("  Локально:    http://127.0.0.1:{}", st.port);
         }
-        None => println!("Облако не запущено."),
+        None => crate::say!("Облако не запущено."),
     }
-    println!("  Автозапуск:  {autostart}");
+    crate::say!("  Автозапуск:  {autostart}");
     let config = Config::load(&config_dir.join(config::CONFIG_FILE)).ok().flatten();
     let terminal = config.as_ref().is_some_and(|c| c.terminal);
-    println!("  Терминал:    {}", if terminal { "включён (--terminal off — выключить)" } else { "выключен" });
+    crate::say!("  Терминал:    {}", if terminal { "включён (--terminal off — выключить)" } else { "выключен" });
     let runner = config.as_ref().is_some_and(|c| c.runner);
-    println!("  Запуск кода: {}", if runner { "включён (--runner off — выключить)" } else { "выключен (--runner on — включить)" });
+    crate::say!("  Запуск кода: {}", if runner { "включён (--runner off — выключить)" } else { "выключен (--runner on — включить)" });
     let agent = config.as_ref().is_some_and(|c| c.agent);
-    println!("  Claude:      {}", if agent { "отвечает в Telegram (--agent off — выключить)" } else { "выключен (--agent on — разговор через Telegram)" });
+    crate::say!("  Claude:      {}", if agent { "отвечает в Telegram (--agent off — выключить)" } else { "выключен (--agent on — разговор через Telegram)" });
     let two_factor = config.as_ref().is_some_and(|c| c.totp_secret.is_some());
-    println!("  Вход:        {}", if two_factor { "пароль + код из приложения" } else { "только пароль (--2fa on — добавить код)" });
+    crate::say!("  Вход:        {}", if two_factor { "пароль + код из приложения" } else { "только пароль (--2fa on — добавить код)" });
     let address = match config.as_ref().and_then(|c| c.named_tunnel.as_ref()) {
         Some(t) => format!("постоянный, {}", t.url),
         None => "случайный trycloudflare.com (--tunnel named — постоянный)".into(),
     };
-    println!("  Адрес:       {address}");
+    crate::say!("  Адрес:       {address}");
     match config.as_ref().and_then(|c| c.backup_dir.as_ref()) {
-        None => println!("  Копия:       не делается (--backup <папка> — включить)"),
+        None => crate::say!("  Копия:       не делается (--backup <папка> — включить)"),
         Some(dir) => {
             let st = backup::State::load(config_dir);
             let last = if st.last_ok > 0 { backup::fmt_time(st.last_ok) } else { "ещё не было".into() };
-            println!("  Копия:       {} · последняя удачная: {last} · файлов: {}", dir.join(backup::COPY_DIR).display(), st.files);
+            crate::say!("  Копия:       {} · последняя удачная: {last} · файлов: {}", dir.join(backup::COPY_DIR).display(), st.files);
             if let Some(err) = st.error {
-                println!("               последняя ошибка: {err}");
+                crate::say!("               последняя ошибка: {err}");
             }
         }
     }
     let auto = config.as_ref().is_some_and(|c| c.upload_token.is_some());
-    println!("  Автозагрузка: {}", if auto { "по ключу (--upload-token off — выключить)" } else { "выключена (--upload-token new — для iPhone)" });
-    println!("  Журнал:      {}", config_dir.join("local-photo.log").display());
+    crate::say!("  Автозагрузка: {}", if auto { "по ключу (--upload-token off — выключить)" } else { "выключена (--upload-token new — для iPhone)" });
+    crate::say!("  Журнал:      {}", config_dir.join("local-photo.log").display());
     service::pause_if_own_window();
     Ok(())
 }
@@ -245,28 +276,28 @@ async fn print_status(config_dir: &Path) -> Result<()> {
 fn set_two_factor(config: &mut Config, on: bool) -> Result<()> {
     if !on {
         config.totp_secret = None;
-        println!("Вход по коду выключен: на сайте снова достаточно логина и пароля.");
+        crate::say!("Вход по коду выключен: на сайте снова достаточно логина и пароля.");
         return Ok(());
     }
     let secret = totp::new_secret();
     let url = totp::otpauth_url(&secret, &config.username);
-    println!("Откройте приложение-аутентификатор (Google Authenticator, Microsoft Authenticator,");
-    println!("2FAS, Aegis…), нажмите «+» и отсканируйте этот QR-код:");
+    crate::say!("Откройте приложение-аутентификатор (Google Authenticator, Microsoft Authenticator,");
+    crate::say!("2FAS, Aegis…), нажмите «+» и отсканируйте этот QR-код:");
     if let Some(qr) = service::qr(&url) {
         for line in qr.lines() {
-            println!("   {line}");
+            crate::say!("   {line}");
         }
     }
-    println!("Или введите ключ вручную: {secret}");
+    crate::say!("Или введите ключ вручную: {secret}");
     for _ in 0..3 {
         let code = config::ask("Код из приложения (6 цифр): ")?;
         if totp::verify(&secret, &code, totp::unix_now()).is_some() {
             config.totp_secret = Some(secret);
-            println!("Готово: вход на сайт теперь требует код из приложения.");
-            println!("Уже открытые на устройствах сеансы остаются. Выключить: local-photo --2fa off");
+            crate::say!("Готово: вход на сайт теперь требует код из приложения.");
+            crate::say!("Уже открытые на устройствах сеансы остаются. Выключить: local-photo --2fa off");
             return Ok(());
         }
-        println!("Код не подошёл. Проверьте, что время на телефоне и компьютере выставлено автоматически.");
+        crate::say!("Код не подошёл. Проверьте, что время на телефоне и компьютере выставлено автоматически.");
     }
     bail!("вход по коду не включён: три неверных кода")
 }
@@ -274,7 +305,7 @@ fn set_two_factor(config: &mut Config, on: bool) -> Result<()> {
 fn set_backup(config: &mut Config, target: Option<&Path>) -> Result<()> {
     let Some(target) = target else {
         config.backup_dir = None;
-        println!("Резервная копия выключена. Уже сделанная копия остаётся на месте.");
+        crate::say!("Резервная копия выключена. Уже сделанная копия остаётся на месте.");
         return Ok(());
     };
     let storage = config.storage_dir.clone().context("сначала настройте облако")?;
@@ -285,26 +316,26 @@ fn set_backup(config: &mut Config, target: Option<&Path>) -> Result<()> {
     // absolute(), not canonicalize(): no verbatim `\\?\` prefix on Windows in config.json and messages.
     let target = std::path::absolute(target).unwrap_or_else(|_| target.to_path_buf());
     config.backup_dir = Some(target.clone());
-    println!("Резервная копия: каждый день в {}", target.join(backup::COPY_DIR).display());
-    println!("Копируются новые и изменённые файлы; удалённые в облаке остаются в копии.");
+    crate::say!("Резервная копия: каждый день в {}", target.join(backup::COPY_DIR).display());
+    crate::say!("Копируются новые и изменённые файлы; удалённые в облаке остаются в копии.");
     if backup::same_disk(&storage, &target) {
-        println!("Внимание: это тот же диск, что и хранилище. Если диск сломается, пропадёт и копия.");
-        println!("Надёжнее — другой диск или внешний диск.");
+        crate::say!("Внимание: это тот же диск, что и хранилище. Если диск сломается, пропадёт и копия.");
+        crate::say!("Надёжнее — другой диск или внешний диск.");
     }
-    println!("Первая копия начнётся через несколько минут после запуска облака (или сейчас: --backup-now).");
+    crate::say!("Первая копия начнётся через несколько минут после запуска облака (или сейчас: --backup-now).");
     Ok(())
 }
 
 fn set_tunnel(config: &mut Config, named: bool) -> Result<()> {
     if !named {
         config.named_tunnel = None;
-        println!("Снова случайный адрес trycloudflare.com. Перезапустите облако: --stop, затем --autostart on");
+        crate::say!("Снова случайный адрес trycloudflare.com. Перезапустите облако: --stop, затем --autostart on");
         return Ok(());
     }
-    println!("Постоянный адрес — туннель Cloudflare на вашем домене (домен должен быть добавлен в Cloudflare).");
-    println!("1. https://one.dash.cloudflare.com → Networks → Tunnels → Create a tunnel → Cloudflared.");
-    println!("2. Скопируйте токен из команды установки (длинная строка после --token или «eyJ…»).");
-    println!("3. Public Hostname: ваш адрес (например cloud.example.com), Service: HTTP, localhost:{}", config.port);
+    crate::say!("Постоянный адрес — туннель Cloudflare на вашем домене (домен должен быть добавлен в Cloudflare).");
+    crate::say!("1. https://one.dash.cloudflare.com → Networks → Tunnels → Create a tunnel → Cloudflared.");
+    crate::say!("2. Скопируйте токен из команды установки (длинная строка после --token или «eyJ…»).");
+    crate::say!("3. Public Hostname: ваш адрес (например cloud.example.com), Service: HTTP, localhost:{}", config.port);
     let url = config::ask("Адрес (например https://cloud.example.com): ")?;
     let url = if url.starts_with("https://") { url } else { format!("https://{}", url.trim_start_matches("http://")) };
     let url = url.trim_end_matches('/').to_string();
@@ -318,16 +349,16 @@ fn set_tunnel(config: &mut Config, named: bool) -> Result<()> {
         bail!("это не похоже на токен туннеля (он длинный, обычно начинается с eyJ)");
     }
     config.named_tunnel = Some(config::NamedTunnel { token, url: url.clone() });
-    println!("Сохранено. Перезапустите облако (--stop, затем --autostart on): сайт будет на {url}");
+    crate::say!("Сохранено. Перезапустите облако (--stop, затем --autostart on): сайт будет на {url}");
     Ok(())
 }
 
 async fn backup_now(config: &Config, config_dir: &Path) -> Result<()> {
     let target = config.backup_dir.clone().context("папка копии не задана: local-photo --backup <папка>")?;
     let storage = config.storage_dir.clone().context("сначала настройте облако")?;
-    println!("Копирую {} → {} …", storage.display(), target.join(backup::COPY_DIR).display());
+    crate::say!("Копирую {} → {} …", storage.display(), target.join(backup::COPY_DIR).display());
     match backup::run_and_record(config_dir, &storage, &target).await.0 {
-        Ok(r) => println!("Готово: {}", backup::describe(&r)),
+        Ok(r) => crate::say!("Готово: {}", backup::describe(&r)),
         Err(e) => bail!("{e}"),
     }
     Ok(())
@@ -342,6 +373,7 @@ async fn run() -> Result<()> {
     std::fs::create_dir_all(&config_dir)?;
     let config_dir = config_dir.canonicalize()?;
     let config_file = config_dir.join(config::CONFIG_FILE);
+    i18n::set(Config::load(&config_file).ok().flatten().and_then(|c| c.lang).as_deref());
     let exe = std::env::current_exe().context("не удалось определить путь к программе")?;
 
     // ---- one-shot commands ----
@@ -350,7 +382,7 @@ async fn run() -> Result<()> {
     }
     if args.stop {
         let stopped = service::stop(&config_dir).await?;
-        println!("{}", if stopped { "Облако остановлено." } else { "Облако не было запущено." });
+        crate::say!("{}", if stopped { "Облако остановлено." } else { "Облако не было запущено." });
         return Ok(());
     }
     if let Some(on) = args.terminal {
@@ -359,10 +391,10 @@ async fn run() -> Result<()> {
         config.save(&config_file)?;
         // The running cloud re-reads this on every connection: no restart needed.
         if on {
-            println!("Терминал включён: кнопка «Терминал» появится на сайте после обновления страницы.");
-            println!("Кто знает пароль — может выполнять любые команды на этом компьютере.");
+            crate::say!("Терминал включён: кнопка «Терминал» появится на сайте после обновления страницы.");
+            crate::say!("Кто знает пароль — может выполнять любые команды на этом компьютере.");
         } else {
-            println!("Терминал выключен. Открытые сеансы закроются в течение 30 секунд.");
+            crate::say!("Терминал выключен. Открытые сеансы закроются в течение 30 секунд.");
         }
         return Ok(());
     }
@@ -372,11 +404,11 @@ async fn run() -> Result<()> {
         config.save(&config_file)?;
         // Read live by the running cloud, like the terminal setting.
         if on {
-            println!("Запуск кода включён: в редакторе файлов появится «▶ Запустить», в «Файлах» — «Новый код».");
-            println!("Программы работают на этом компьютере с правами этого пользователя: кто знает пароль —");
-            println!("может выполнить любой код. Включите вход с кодом из приложения: local-photo --2fa on");
+            crate::say!("Запуск кода включён: в редакторе файлов появится «▶ Запустить», в «Файлах» — «Новый код».");
+            crate::say!("Программы работают на этом компьютере с правами этого пользователя: кто знает пароль —");
+            crate::say!("может выполнить любой код. Включите вход с кодом из приложения: local-photo --2fa on");
         } else {
-            println!("Запуск кода выключен.");
+            crate::say!("Запуск кода выключен.");
         }
         return Ok(());
     }
@@ -389,17 +421,17 @@ async fn run() -> Result<()> {
         config.save(&config_file)?;
         // Read live by the running cloud, like the terminal setting.
         if on {
-            println!("Claude включён: пишите боту обычным текстом, /help — команды.");
-            println!("Claude работает на этом компьютере с вашими правами: читает и меняет файлы, запускает команды.");
-            println!("Опасные действия он не выполняет сам (режим auto), но кто получит ваш Telegram — получит и");
-            println!("этот компьютер. Включите облачный пароль в Telegram: Настройки → Конфиденциальность.");
+            crate::say!("Claude включён: пишите боту обычным текстом, /help — команды.");
+            crate::say!("Claude работает на этом компьютере с вашими правами: читает и меняет файлы, запускает команды.");
+            crate::say!("Опасные действия он не выполняет сам (режим auto), но кто получит ваш Telegram — получит и");
+            crate::say!("этот компьютер. Включите облачный пароль в Telegram: Настройки → Конфиденциальность.");
             if runner::which("claude").is_none() {
-                println!();
-                println!("Внимание: Claude Code не найден. Установите его (https://claude.com/claude-code) и войдите: claude");
+                crate::say!();
+                crate::say!("Внимание: Claude Code не найден. Установите его (https://claude.com/claude-code) и войдите: claude");
             }
-            println!("Пока компьютер спит или выключен, Claude не отвечает: сообщения дождутся включения (до суток).");
+            crate::say!("Пока компьютер спит или выключен, Claude не отвечает: сообщения дождутся включения (до суток).");
         } else {
-            println!("Claude в Telegram выключен. Если он сейчас работает — остановится в течение нескольких секунд.");
+            crate::say!("Claude в Telegram выключен. Если он сейчас работает — остановится в течение нескольких секунд.");
         }
         return Ok(());
     }
@@ -407,7 +439,7 @@ async fn run() -> Result<()> {
         let mut config = Config::load(&config_file)?.context("сначала настройте облако: запустите программу без параметров")?;
         if let Some(lang) = &args.lang {
             config.lang = (lang != "ru").then(|| lang.clone());
-            println!("{}", if lang == "en" { "Telegram messages and the console are now in English." } else { "Сообщения в Telegram и в консоли — по-русски." });
+            crate::say!("{}", if lang == "en" { "Telegram messages and the console are now in English." } else { "Сообщения в Telegram и в консоли — по-русски." });
         }
         match args.upload_token {
             Some(true) => {
@@ -416,23 +448,23 @@ async fn run() -> Result<()> {
                 let url = service::running(&config_dir).await.and_then(|st| st.url)
                     .or_else(|| config.named_tunnel.as_ref().map(|t| t.url.clone()))
                     .unwrap_or_else(|| "https://<адрес облака>".into());
-                println!("Ключ автозагрузки (показывается один раз, старый ключ больше не действует):");
-                println!();
-                println!("   {token}");
-                println!();
-                println!("В «Быстрой команде» на iPhone:");
-                println!("   URL:       {url}/api/auto-upload?name=<имя файла>");
-                println!("   Метод:     POST, тело запроса — Файл");
-                println!("   Заголовок: Authorization = Bearer {token}");
-                println!("Пошагово — в README, раздел «Автозагрузка с iPhone».");
+                crate::say!("Ключ автозагрузки (показывается один раз, старый ключ больше не действует):");
+                crate::say!();
+                crate::say!("   {token}");
+                crate::say!();
+                crate::say!("В «Быстрой команде» на iPhone:");
+                crate::say!("   URL:       {url}/api/auto-upload?name=<имя файла>");
+                crate::say!("   Метод:     POST, тело запроса — Файл");
+                crate::say!("   Заголовок: Authorization = Bearer {token}");
+                crate::say!("Пошагово — в README, раздел «Автозагрузка с iPhone».");
                 if config.named_tunnel.is_none() {
-                    println!("Внимание: адрес trycloudflare меняется при каждом перезапуске облака — его придётся");
-                    println!("исправлять в команде. Постоянный адрес: local-photo --tunnel named");
+                    crate::say!("Внимание: адрес trycloudflare меняется при каждом перезапуске облака — его придётся");
+                    crate::say!("исправлять в команде. Постоянный адрес: local-photo --tunnel named");
                 }
             }
             Some(false) => {
                 config.upload_token = None;
-                println!("Автозагрузка выключена: ключ больше не действует.");
+                crate::say!("Автозагрузка выключена: ключ больше не действует.");
             }
             None => {}
         }
@@ -465,14 +497,14 @@ async fn run() -> Result<()> {
             }
             let _ = service::stop(&config_dir).await;   // the background copy replaces this one
             let how = service::enable_autostart(&exe, args.dir.as_deref())?;
-            println!("Автозапуск включён: {how}. Облако запускается в фоне…");
+            crate::say!("Автозапуск включён: {how}. Облако запускается в фоне…");
             match service::wait_for_url(&config_dir, Duration::from_secs(90)).await {
                 Some(url) => show_url(&url),
-                None => println!("Адрес придёт в Telegram; узнать его: local-photo --status"),
+                None => crate::say!("Адрес придёт в Telegram; узнать его: local-photo --status"),
             }
         } else {
             service::disable_autostart()?;
-            println!("Автозапуск выключен. (Если облако сейчас работает в фоне: local-photo --stop)");
+            crate::say!("Автозапуск выключен. (Если облако сейчас работает в фоне: local-photo --stop)");
         }
         return Ok(());
     }
@@ -482,13 +514,13 @@ async fn run() -> Result<()> {
         if args.background {
             return Ok(());   // autostart fired while a copy already runs
         }
-        println!("Облако уже работает (второй раз запускать не нужно).");
+        crate::say!("Облако уже работает (второй раз запускать не нужно).");
         match &st.url {
             Some(url) => show_url(url),
-            None if !st.tunnel => println!("Без туннеля: http://127.0.0.1:{}", st.port),
-            None => println!("Туннель ещё открывается — адрес придёт в Telegram."),
+            None if !st.tunnel => crate::say!("Без туннеля: http://127.0.0.1:{}", st.port),
+            None => crate::say!("Туннель ещё открывается — адрес придёт в Telegram."),
         }
-        println!("Остановить: local-photo --stop · Подробнее: local-photo --status");
+        crate::say!("Остановить: local-photo --stop · Подробнее: local-photo --status");
         service::pause_if_own_window();
         return Ok(());
     }
@@ -522,21 +554,21 @@ async fn run() -> Result<()> {
 
     // Right after setting up in a window: offer to keep it running without the window.
     if first_setup && !args.background && !args.no_tunnel && !service::autostart_enabled() {
-        println!("Облако может запускаться само при входе в систему и работать в фоне —");
-        println!("тогда это окно не нужно держать открытым.");
+        crate::say!("Облако может запускаться само при входе в систему и работать в фоне —");
+        crate::say!("тогда это окно не нужно держать открытым.");
         if config::ask_yes("Включить автозапуск? [Д/н]: ")? {
             let how = service::enable_autostart(&exe, args.dir.as_deref())?;
-            println!("Автозапуск включён: {how}. Запускаю облако в фоне…");
+            crate::say!("Автозапуск включён: {how}. Запускаю облако в фоне…");
             match service::wait_for_url(&config_dir, Duration::from_secs(90)).await {
                 Some(url) => show_url(&url),
-                None => println!("Адрес придёт в Telegram; узнать его: local-photo --status"),
+                None => crate::say!("Адрес придёт в Telegram; узнать его: local-photo --status"),
             }
-            println!("Это окно можно закрыть — облако работает в фоне.");
-            println!("Узнать адрес: local-photo --status · Остановить: local-photo --stop");
+            crate::say!("Это окно можно закрыть — облако работает в фоне.");
+            crate::say!("Узнать адрес: local-photo --status · Остановить: local-photo --stop");
             service::pause_if_own_window();
             return Ok(());
         }
-        println!();
+        crate::say!();
     }
 
     // Unfinished uploads from a previous run can't be resumed (the browser lost its id).

@@ -149,8 +149,8 @@ pub fn own_console_window() -> bool {
 
 pub fn pause_if_own_window() {
     if own_console_window() {
-        println!();
-        println!("Нажмите Enter, чтобы закрыть окно.");
+        crate::say!();
+        crate::say!("Нажмите Enter, чтобы закрыть окно.");
         let _ = std::io::stdin().read_line(&mut String::new());
     }
 }
@@ -209,7 +209,7 @@ pub fn enable_autostart(exe: &Path, dir_arg: Option<&Path>) -> Result<String> {
             let user = std::env::var("USER").unwrap_or_default();
             let linger = Command::new("loginctl").args(["enable-linger", &user]).output().is_ok_and(|o| o.status.success());
             if !linger {
-                println!("  Чтобы облако работало и без входа в систему, выполните: sudo loginctl enable-linger {user}");
+                crate::say!("  Чтобы облако работало и без входа в систему, выполните: sudo loginctl enable-linger {user}");
             }
             Ok(format!("служба systemd ({})", unit.display()))
         } else {

@@ -87,7 +87,7 @@ async function boot() {
   try {
     const res = await fetch(base);
     const data = await res.json().catch(() => null);
-    if (!res.ok) throw new Error((data && data.error) || `${t('Ошибка')} ${res.status}`);
+    if (!res.ok) throw new Error((data && tServer(data.error)) || `${t('Ошибка')} ${res.status}`);
     render(data);
   } catch (e) {
     $('#share-title').textContent = t('Ссылка не открывается');

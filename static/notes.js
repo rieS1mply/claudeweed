@@ -1,7 +1,7 @@
 'use strict';
 // Notes, like iOS Notes: a list grouped by date, a full-screen editor that saves by itself.
 
-const WEEKDAYS = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+const WEEKDAYS = [t('воскресенье'), t('понедельник'), t('вторник'), t('среда'), t('четверг'), t('пятница'), t('суббота')];
 const NOTE_SAVE_DELAY = 700;
 
 function startOfDay(d) {
@@ -12,10 +12,10 @@ function startOfDay(d) {
 function noteGroup(ms) {
   const today = startOfDay(new Date());
   const day = 86400e3;
-  if (ms >= today) return 'Сегодня';
-  if (ms >= today - day) return 'Вчера';
-  if (ms >= today - 7 * day) return 'Последние 7 дней';
-  if (ms >= today - 30 * day) return 'Последние 30 дней';
+  if (ms >= today) return t('Сегодня');
+  if (ms >= today - day) return t('Вчера');
+  if (ms >= today - 7 * day) return t('Последние 7 дней');
+  if (ms >= today - 30 * day) return t('Последние 30 дней');
   const d = new Date(ms);
   return `${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
 }
@@ -36,12 +36,12 @@ function renderNotes(list) {
   if (!n) {
     content.replaceChildren(el('div', { class: 'empty' },
       icon('note'),
-      el('div', { text: 'Нет заметок' }),
-      el('div', { class: 'hint', text: 'Нажмите «+», чтобы создать. Заметки доступны с любого устройства' })));
+      el('div', { text: t('Нет заметок') }),
+      el('div', { class: 'hint', text: t('Нажмите «+», чтобы создать. Заметки доступны с любого устройства') })));
     return;
   }
   const found = filterByQuery(list.items, (note) => `${note.title}\n${note.preview || ''}`, (note) => contentSnippet('notes', note.id));
-  if (found.length !== n) $('#summary').textContent = `Найдено ${found.length} из ${n}`;
+  if (found.length !== n) $('#summary').textContent = t('Найдено {0} из {1}', { 0: found.length, 1: n });
   if (!found.length) return content.replaceChildren(nothingFound());
   const groups = new Map();
   for (const note of found) {
@@ -54,10 +54,10 @@ function renderNotes(list) {
     frag.append(el('section', { class: 'month-block' },
       el('div', { class: 'month' }, el('span', { class: 'month-chip glass' }, title)),
       el('div', { class: 'files notes' }, ...notes.map((note) => el('div', { class: 'note-row', onclick: () => openNote(note.id) },
-        el('div', { class: 'note-title', text: note.title }),
+        el('div', { class: 'note-title', text: note.title === 'Новая заметка' ? t('Новая заметка') : note.title }),
         el('div', { class: 'note-meta' },
           el('span', { class: 'note-date', text: noteDate(note.updated) }),
-          el('span', { class: 'note-preview', text: contentSnippet('notes', note.id) ?? (note.preview || 'Нет дополнительного текста') })))))));
+          el('span', { class: 'note-preview', text: contentSnippet('notes', note.id) ?? (note.preview || t('Нет дополнительного текста')) })))))));
   }
   content.replaceChildren(frag);
 }
@@ -85,16 +85,16 @@ async function openNote(id, { fresh = false } = {}) {
     clearTimeout(s.timer);
     if (s.text === s.saved && !force) return;
     const text = s.text;
-    $('#doc-status').textContent = 'Сохранение…';
+    $('#doc-status').textContent = t('Сохранение…');
     s.saving = (async () => {
       try {
         const res = await api.noteSave(id, text, force ? null : s.base, keepalive);
         s.base = res.updated;
         s.saved = text;
-        if (s.text === text) $('#doc-status').textContent = 'Сохранено';
+        if (s.text === text) $('#doc-status').textContent = t('Сохранено');
       } catch (e) {
         if (e.status === 409) return conflict(e.data);
-        $('#doc-status').textContent = 'Не сохранено';
+        $('#doc-status').textContent = t('Не сохранено');
         toast(e.message);
       }
     })();
@@ -103,25 +103,25 @@ async function openNote(id, { fresh = false } = {}) {
 
   // The same note was changed on another device since we opened it.
   const conflict = async (server) => {
-    const keepMine = await confirmDialog('Пока вы писали, заметку изменили на другом устройстве.',
-      { title: 'Заметка изменена', ok: 'Оставить мою', cancel: 'Загрузить новую', destructive: false });
+    const keepMine = await confirmDialog(t('Пока вы писали, заметку изменили на другом устройстве.'),
+      { title: t('Заметка изменена'), ok: t('Оставить мою'), cancel: t('Загрузить новую'), destructive: false });
     if (keepMine) return save(true);
     s.text = s.saved = server.content;
     s.base = server.updated;
     $('#doc-text').value = server.content;
-    $('#doc-status').textContent = 'Обновлено';
+    $('#doc-status').textContent = t('Обновлено');
   };
 
-  const remove = el('button', { class: 'doc-btn icon-only', title: 'Удалить заметку' }, icon('trash'));
+  const remove = el('button', { class: 'doc-btn icon-only', title: t('Удалить заметку') }, icon('trash'));
   remove.onclick = async () => {
-    if (!(await confirmDialog('Заметка будет перемещена в корзину.', { title: 'Удалить заметку?' }))) return;
+    if (!(await confirmDialog(t('Заметка будет перемещена в корзину.'), { title: t('Удалить заметку?') }))) return;
     clearTimeout(s.timer);
     try {
       const res = await api.noteDelete(id);
       flushNote = null;
       await closeDocView();
       state.data.trash = null;
-      toast('Заметка удалена', { action: 'Отменить', onAction: () => undoDelete(res.trash_id, 'notes') });
+      toast(t('Заметка удалена'), { action: t('Отменить'), onAction: () => undoDelete(res.trash_id, 'notes') });
       load('notes');
     } catch (e) {
       toast(e.message);
@@ -133,8 +133,8 @@ async function openNote(id, { fresh = false } = {}) {
   flushNote = () => { if (s.text !== s.saved && s.text.trim()) save(false, s.text.length < 60000); };
 
   await openDocView({
-    title: '', text: note.content, mono: false, left: '‹ Заметки', right: [remove], slide: 'left',
-    status: fresh ? '' : 'Сохранено',
+    title: '', text: note.content, mono: false, left: t('‹ Заметки'), right: [remove], slide: 'left',
+    status: fresh ? '' : t('Сохранено'),
     onInput: (v) => {
       s.text = v;
       $('#doc-status').textContent = '';

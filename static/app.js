@@ -3,8 +3,8 @@
 // Demo mode: page opened as a local file (no server) or with ?mock in the URL.
 const MOCK = location.protocol === 'file:' || new URLSearchParams(location.search).has('mock');
 const CHUNK_SIZE = 16 * 1024 * 1024;
-const MONTHS = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
-const MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+const MONTHS = [t('Январь'), t('Февраль'), t('Март'), t('Апрель'), t('Май'), t('Июнь'), t('Июль'), t('Август'), t('Сентябрь'), t('Октябрь'), t('Ноябрь'), t('Декабрь')];
+const MONTHS_GEN = [t('января'), t('февраля'), t('марта'), t('апреля'), t('мая'), t('июня'), t('июля'), t('августа'), t('сентября'), t('октября'), t('ноября'), t('декабря')];
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 const ICONS = {
@@ -46,7 +46,7 @@ function icon(name) {
 const pad = (n) => String(n).padStart(2, '0');
 
 function fmtSize(bytes) {
-  const units = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];
+  const units = [t('Б'), t('КБ'), t('МБ'), t('ГБ'), t('ТБ')];
   let v = bytes, i = 0;
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
   const num = i === 0 ? String(v) : v.toFixed(v < 10 ? 1 : 0).replace('.', ',');
@@ -140,7 +140,7 @@ function hideAlert(modal, box) {
 
 /** iOS-style two-button alert. Resolves true for the main button. */
 function confirmDialog(text, opts = {}) {
-  const { title = 'Удалить?', ok = 'Удалить', cancel = 'Отмена', destructive = true } = opts;
+  const { title = t('Удалить?'), ok = t('Удалить'), cancel = t('Отмена'), destructive = true } = opts;
   return new Promise((resolve) => {
     const modal = $('#modal'), box = $('#alert');
     $('#alert-title').textContent = title;
@@ -166,7 +166,7 @@ function promptDialog(title, value, opts = {}) {
   return new Promise((resolve) => {
     const modal = $('#prompt'), box = $('#prompt-box'), input = $('#prompt-input');
     $('#prompt-title').textContent = title;
-    $('#prompt-ok').textContent = opts.ok || 'Готово';
+    $('#prompt-ok').textContent = opts.ok || t('Готово');
     input.value = value;
     showAlert(modal, box);
     // Select the name without its extension, as Finder/Files do.
@@ -258,7 +258,7 @@ function prepareShare(section, item) {
       shareReady.delete(oldest);
     }
     const p = fetch(api.fileUrl(section, item, false), { credentials: 'same-origin' })
-      .then((r) => { if (!r.ok) throw new HttpError(r.status, `Ошибка ${r.status}`); return r.blob(); })
+      .then((r) => { if (!r.ok) throw new HttpError(r.status, t('Ошибка {0}', { 0: r.status })); return r.blob(); })
       .then((b) => {
         const file = new File([b], item.name, { type: b.type || 'application/octet-stream' });
         shareReady.set(key, file);
@@ -274,7 +274,7 @@ async function openShareSheet(file) {
   try {
     await navigator.share({ files: [file] });
   } catch (e) {
-    if (e.name !== 'AbortError') toast('Не удалось открыть меню «Поделиться»');
+    if (e.name !== 'AbortError') toast(t('Не удалось открыть меню «Поделиться»'));
   }
 }
 
@@ -283,10 +283,10 @@ async function openShareSheet(file) {
 async function shareItem(section, item) {
   const ready = shareReady.get(shareKey(section, item));
   if (ready) return openShareSheet(ready);
-  toast('Подготовка файла…');
+  toast(t('Подготовка файла…'));
   try {
     const file = await prepareShare(section, item);
-    toast('Файл готов', { action: 'Сохранить', onAction: () => openShareSheet(file) });
+    toast(t('Файл готов'), { action: t('Сохранить'), onAction: () => openShareSheet(file) });
   } catch (e) {
     toast(e.message);
   }
@@ -318,15 +318,15 @@ async function request(url, opts = {}) {
   try {
     res = await fetch(url, { method: opts.method || 'GET', headers, body, credentials: 'same-origin', keepalive: Boolean(opts.keepalive) });
   } catch {
-    throw new HttpError(0, 'Нет соединения с сервером');
+    throw new HttpError(0, t('Нет соединения с сервером'));
   }
   let data = null;
   if ((res.headers.get('content-type') || '').includes('application/json')) data = await res.json().catch(() => null);
   if (res.status === 401 && !opts.allow401) {
     showLogin();
-    throw new HttpError(401, 'Требуется вход');
+    throw new HttpError(401, t('Требуется вход'));
   }
-  if (!res.ok) throw new HttpError(res.status, (data && data.error) || `Ошибка ${res.status}`, data);
+  if (!res.ok) throw new HttpError(res.status, (data && tServer(data.error)) || t('Ошибка {0}', { 0: res.status }), data);
   return data;
 }
 
@@ -341,9 +341,9 @@ function putChunk(url, blob, onProgress) {
       let data = null;
       try { data = JSON.parse(xhr.responseText); } catch { /* not json */ }
       if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-      else reject(new HttpError(xhr.status, (data && data.error) || `Ошибка ${xhr.status}`, data));
+      else reject(new HttpError(xhr.status, (data && tServer(data.error)) || t('Ошибка {0}', { 0: xhr.status }), data));
     };
-    xhr.onerror = () => reject(new HttpError(0, 'Нет соединения'));
+    xhr.onerror = () => reject(new HttpError(0, t('Нет соединения')));
     xhr.send(blob);
   });
 }
@@ -366,15 +366,15 @@ const realApi = {
   versions: (section, item) => request(`/api/versions?${qs({ section, path: item.path })}`),
   async versionText(id) {
     const res = await fetch(`/api/trash/${id}/file`, { credentials: 'same-origin' });
-    if (!res.ok) throw new HttpError(res.status, `Ошибка ${res.status}`);
+    if (!res.ok) throw new HttpError(res.status, t('Ошибка {0}', { 0: res.status }));
     return res.text();
   },
   copy: (section, item, name, blob) => request(`/api/file/copy?${qs({ section, path: item.path, name })}`,
     { method: 'POST', body: blob, headers: { 'Content-Type': 'application/octet-stream' } }),
   async readText(section, item) {
     const res = await fetch(realApi.fileUrl(section, item, true), { credentials: 'same-origin' });
-    if (res.status === 401) { showLogin(); throw new HttpError(401, 'Требуется вход'); }
-    if (!res.ok) throw new HttpError(res.status, `Ошибка ${res.status}`);
+    if (res.status === 401) { showLogin(); throw new HttpError(401, t('Требуется вход')); }
+    if (!res.ok) throw new HttpError(res.status, t('Ошибка {0}', { 0: res.status }));
     return res.text();
   },
 
@@ -536,7 +536,7 @@ const mockApi = (() => {
     const lines = n.content.split('\n').map((l) => l.trim()).filter(Boolean);
     return {
       id: n.id, updated: n.updated,
-      title: (lines[0] || '').replace(/^#+\s*/, '').slice(0, 80) || 'Новая заметка',
+      title: (lines[0] || '').replace(/^#+\s*/, '').slice(0, 80) || t('Новая заметка'),
       preview: lines.slice(1).join(' ').slice(0, 140),
     };
   };
@@ -546,7 +546,7 @@ const mockApi = (() => {
     async session() { return { authenticated: authed }; },
     async login(u, p) {
       await delay(400);
-      if (!u || !p) throw new HttpError(401, 'Неверный логин или пароль');
+      if (!u || !p) throw new HttpError(401, t('Неверный логин или пароль'));
       authed = true;
       return { ok: true };
     },
@@ -616,7 +616,7 @@ const mockApi = (() => {
     },
     async noteGet(id) {
       const n = data.notes.find((x) => x.id === id);
-      if (!n) throw new HttpError(404, 'Заметка не найдена');
+      if (!n) throw new HttpError(404, t('Заметка не найдена'));
       return { ...n };
     },
     async noteSave(id, content) {
@@ -634,7 +634,7 @@ const mockApi = (() => {
       return { trash_id: t.id };
     },
 
-    async zipStart() { throw new HttpError(0, 'В демо-режиме архивы не создаются'); },
+    async zipStart() { throw new HttpError(0, t('В демо-режиме архивы не создаются')); },
     async search(q) {
       const words = q.toLowerCase().split(/\s+/).filter(Boolean);
       const has = (s) => words.every((w) => s.toLowerCase().includes(w));
@@ -644,14 +644,14 @@ const mockApi = (() => {
       ] };
     },
     async folderCreate(section, name) { (data.folders[section] ||= []).push(name); return { name }; },
-    async folderRename() { throw new HttpError(0, 'В демо-режиме недоступно'); },
-    async folderDelete() { throw new HttpError(0, 'В демо-режиме недоступно'); },
+    async folderRename() { throw new HttpError(0, t('В демо-режиме недоступно')); },
+    async folderDelete() { throw new HttpError(0, t('В демо-режиме недоступно')); },
     async move(section, item, dest) {
       item.path = dest ? `${dest}/${item.name}` : `${folder(item.date)}/${item.name}`;
       return { path: item.path };
     },
     async shares() { return { items: [] }; },
-    async shareCreate() { throw new HttpError(0, 'В демо-режиме ссылки не создаются'); },
+    async shareCreate() { throw new HttpError(0, t('В демо-режиме ссылки не создаются')); },
     async shareRevoke() {},
     previewUrl() { return ''; },
     async putPreview() {},
@@ -772,7 +772,7 @@ async function onLogin(e) {
 // ---------- sections ----------
 
 const SECTIONS = ['photos', 'files', 'notes', 'trash'];
-const TITLES = { photos: 'Фото', files: 'Файлы', notes: 'Заметки', trash: 'Корзина' };
+const TITLES = { photos: t('Фото'), files: t('Файлы'), notes: t('Заметки'), trash: t('Корзина') };
 
 // Top segmented control, the phone tab bar and the trash button all switch sections.
 function setSection(section) {
@@ -816,7 +816,7 @@ function updateAddButtons() {
   if (show && fab.hidden) enter(fab, [{ opacity: 0, transform: 'scale(.6)' }, { opacity: 1, transform: 'none' }], 'bouncy');
   if (!show) leave(fab, [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(.6)' }]);
   $('#upload-btn').hidden = !show;
-  const label = state.section === 'notes' ? 'Новая заметка' : 'Загрузить';
+  const label = state.section === 'notes' ? t('Новая заметка') : t('Загрузить');
   $('#upload-btn').title = fab.title = label;
 }
 
@@ -858,8 +858,8 @@ function filterByQuery(items, textOf, hitOf) {
 
 function nothingFound() {
   return el('div', { class: 'empty' },
-    el('div', { text: 'Ничего не найдено' }),
-    el('div', { class: 'hint', text: `По запросу «${$('#search').value.trim()}»` }));
+    el('div', { text: t('Ничего не найдено') }),
+    el('div', { class: 'hint', text: t('По запросу «{0}»', { 0: $('#search').value.trim() }) }));
 }
 
 function bindSearch() {
@@ -943,8 +943,8 @@ function groupByMonth(items) {
 
 // Sort by when it was taken/created (folders on disk) or by when it was uploaded.
 const SORTS = {
-  photos: { taken: 'По дате съёмки', added: 'По дате загрузки' },
-  files: { taken: 'По дате создания', added: 'По дате загрузки' },
+  photos: { taken: t('По дате съёмки'), added: t('По дате загрузки') },
+  files: { taken: t('По дате создания'), added: t('По дате загрузки') },
 };
 const sortOrder = (() => {
   try { return { photos: 'taken', files: 'taken', ...JSON.parse(localStorage.getItem('lp-sort') || '{}') }; }
@@ -953,7 +953,7 @@ const sortOrder = (() => {
 
 function chooseSort() {
   const section = state.section;
-  return actionSheet('Сортировка', Object.entries(SORTS[section]).map(([key, label]) => ({
+  return actionSheet(t('Сортировка'), Object.entries(SORTS[section]).map(([key, label]) => ({
     label: key === sortOrder[section] ? `✓ ${label}` : label,
     run: () => {
       if (key === sortOrder[section]) return;
@@ -999,8 +999,8 @@ function render() {
   action.textContent = `${SORTS[section][sortOrder[section]]} ▾`;
   headAction = chooseSort;
   $('#summary').textContent = n
-    ? `${n} ${section === 'photos' ? 'фото и видео' : plural(n, 'файл', 'файла', 'файлов')} · ${fmtSize(total_size)}`
-      + (disk_free != null ? ` · свободно ${fmtSize(disk_free)}` : '')
+    ? `${n} ${section === 'photos' ? t('фото и видео') : plural(n, 'файл', 'файла', 'файлов')} · ${fmtSize(total_size)}`
+      + (disk_free != null ? ` · ${t('свободно {0}', { 0: fmtSize(disk_free) })}` : '')
     : '';
   // Uploads stop below 1 GB free (DISK_RESERVE on the server): warn well before that.
   $('#summary').classList.toggle('warn', disk_free != null && disk_free < 10 * 1024 ** 3);
@@ -1015,7 +1015,7 @@ function render() {
         : t('Нажмите «+» или перетащите файлы в окно') })));
     return;
   }
-  if (items.length !== n) $('#summary').textContent = `Найдено ${items.length} из ${n}`;
+  if (items.length !== n) $('#summary').textContent = t('Найдено {0} из {1}', { 0: items.length, 1: n });
   if (!items.length) {
     state.flat = [];
     content.replaceChildren(nothingFound());
@@ -1086,8 +1086,8 @@ function renderFiles(items) {
         // Two spans: one line on a phone, two columns on a wide screen.
         el('div', { class: 'file-meta' },
           el('span', { class: 'file-size', text: fmtSize(item.size) }),
-          el('span', { class: 'file-date', text: sortOrder.files === 'added' ? `загружен ${fmtDate(item.added)}` : fmtDate(item.date) }))),
-      el('button', { class: 'btn round', title: 'Действия', onclick: (e) => { e.stopPropagation(); itemActions('files', item); } }, icon('more')));
+          el('span', { class: 'file-date', text: sortOrder.files === 'added' ? t('загружен {0}', { 0: fmtDate(item.added) }) : fmtDate(item.date) }))),
+      el('button', { class: 'btn round', title: t('Действия'), onclick: (e) => { e.stopPropagation(); itemActions('files', item); } }, icon('more')));
     rows.set(item, row);
     nodeItem.set(row, item);
     box.append(row);
@@ -1107,25 +1107,25 @@ function itemActions(section, item) {
   const canEditPhoto = item.kind === 'image' || item.kind === 'raw';
   const media = item.kind !== 'file';
   return actionSheet(item.name, [
-    CAN_SHARE_FILES && { label: media ? 'Сохранить в галерею' : 'Поделиться', hint: media ? 'в меню выберите «Сохранить изображение/видео»' : '', run: () => shareItem(section, item) },
-    isTextFile(item.name) && { label: 'Редактировать', run: () => openTextEditor(section, item) },
-    canEditPhoto && { label: 'Редактировать фото', run: () => openEditor(section, item) },
-    { label: 'Переименовать', run: () => renameItem(section, item) },
+    CAN_SHARE_FILES && { label: media ? t('Сохранить в галерею') : t('Поделиться'), hint: media ? t('в меню выберите «Сохранить изображение/видео»') : '', run: () => shareItem(section, item) },
+    isTextFile(item.name) && { label: t('Редактировать'), run: () => openTextEditor(section, item) },
+    canEditPhoto && { label: t('Редактировать фото'), run: () => openEditor(section, item) },
+    { label: t('Переименовать'), run: () => renameItem(section, item) },
     { label: t('Переложить в папку'), run: () => moveToFolder(section, [item]) },
     { label: t('Ссылка без пароля'), hint: t('на 1, 7 или 30 дней'), run: () => createShareLink(section, [item]) },
     ...conversionsFor(section, item),
-    { label: 'Скачать', run: () => triggerDownload(api.fileUrl(section, item, true), item.name) },
-    { label: 'Удалить', destructive: true, run: () => (section === 'photos' && viewer.open ? deleteFromViewer() : deleteItem(section, item)) },
+    { label: t('Скачать'), run: () => triggerDownload(api.fileUrl(section, item, true), item.name) },
+    { label: t('Удалить'), destructive: true, run: () => (section === 'photos' && viewer.open ? deleteFromViewer() : deleteItem(section, item)) },
   ]);
 }
 
 async function renameItem(section, item) {
-  const name = await promptDialog('Переименовать', item.name, { selectStem: true });
+  const name = await promptDialog(t('Переименовать'), item.name, { selectStem: true });
   if (!name || name === item.name) return;
   try {
     const res = await api.rename(section, item, name);
     if (viewer.open) { item.path = res.path; item.name = res.path.split('/').pop(); $('#lb-title').textContent = item.name; }
-    toast('Переименовано');
+    toast(t('Переименовано'));
   } catch (e) {
     return toast(e.message);
   }
@@ -1133,7 +1133,7 @@ async function renameItem(section, item) {
 }
 
 async function deleteItem(section, item, { confirm = true } = {}) {
-  if (confirm && !(await confirmDialog(`«${item.name}» будет перемещён в корзину. Его можно восстановить в течение 30 дней.`, { title: 'Удалить?' }))) return false;
+  if (confirm && !(await confirmDialog(t('«{0}» будет перемещён в корзину. Его можно восстановить в течение 30 дней.', { 0: item.name }), { title: t('Удалить?') }))) return false;
   let res;
   try {
     res = await api.remove(section, item);
@@ -1152,7 +1152,7 @@ async function deleteItem(section, item, { confirm = true } = {}) {
     }
   }
   state.data.trash = null;
-  toast('Перемещено в корзину', { action: 'Отменить', onAction: () => undoDelete(res.trash_id, section) });
+  toast(t('Перемещено в корзину'), { action: t('Отменить'), onAction: () => undoDelete(res.trash_id, section) });
   await load(section);
   return true;
 }
@@ -1225,7 +1225,7 @@ function fillFrame(item) {
   $('#lb-title').textContent = item.name;
   // Upload date only when it says something new (another day than the photo's own date).
   const uploaded = item.added && new Date(item.added).toDateString() !== new Date(item.date).toDateString();
-  $('#lb-meta').textContent = `${fmtDate(item.date)} · ${fmtSize(item.size)}${uploaded ? ` · загружено ${noteDateShort(item.added)}` : ''}`;
+  $('#lb-meta').textContent = `${fmtDate(item.date)} · ${fmtSize(item.size)}${uploaded ? ` · ${t('загружено {0}', { 0: noteDateShort(item.added) })}` : ''}`;
   $('#lb-edit').hidden = !(item.kind === 'image' || item.kind === 'raw');
   $('#lb-share').hidden = !CAN_SHARE_FILES;
   if (CAN_SHARE_FILES && item.kind !== 'video') prepareShare('photos', item);
@@ -1459,7 +1459,7 @@ function enqueueUploads(files) {
   if (panel.hidden) enter(panel, UPLOADS_IN, 'bouncy');
   for (const file of files) {
     const bar = el('div');
-    const status = el('span', { class: 'up-status', text: 'в очереди' });
+    const status = el('span', { class: 'up-status', text: t('в очереди') });
     const row = el('div', { class: 'up-row' },
       el('div', { class: 'up-top' }, el('span', { class: 'up-name', text: file.name }), status),
       el('div', { class: 'up-bar' }, bar));
@@ -1474,12 +1474,12 @@ function enqueueUploads(files) {
 
 function updateUploadTitle() {
   $('#uploads-title').textContent = uploading || uploadQueue.length
-    ? `Загрузка ${uploadStats.done} из ${uploadStats.total}`
-    : `Загружено ${uploadStats.done} из ${uploadStats.total}`;
+    ? t('Загрузка {0} из {1}', { 0: uploadStats.done, 1: uploadStats.total })
+    : t('Загружено {0} из {1}', { 0: uploadStats.done, 1: uploadStats.total });
 }
 
 async function closeUploads() {
-  if (uploading) return toast('Загрузка ещё идёт');
+  if (uploading) return toast(t('Загрузка ещё идёт'));
   await leave($('#uploads'), UPLOADS_OUT);
   $('#uploads-list').replaceChildren();
   uploadStats = { done: 0, total: 0, failed: 0 };
@@ -1496,7 +1496,7 @@ async function runUploads() {
         job.status.textContent = `${Math.round(p * 100)}%`;
       }, job.target);
       previewAfterUpload(job.file, res);
-      job.status.textContent = res.section === 'photos' ? '→ Фото' : '→ Файлы';
+      job.status.textContent = res.section === 'photos' ? t('→ Фото') : t('→ Файлы');
       job.status.classList.add('ok');
       uploadStats.done++;
     } catch (e) {
@@ -1573,7 +1573,7 @@ function bindUi() {
     if (state.section !== 'photos' && state.section !== 'files') return;
     e.preventDefault();
     enqueueUploads(files.map((f, i) => (f.name && f.name !== 'image.png' ? f
-      : new File([f], `Вставка ${new Date().toISOString().slice(0, 19).replace('T', ' ').replace(/:/g, '-')}${i ? `-${i}` : ''}.${f.type.split('/')[1] || 'png'}`, { type: f.type }))));
+      : new File([f], `${t('Вставка')} ${new Date().toISOString().slice(0, 19).replace('T', ' ').replace(/:/g, '-')}${i ? `-${i}` : ''}.${f.type.split('/')[1] || 'png'}`, { type: f.type }))));
   });
 
   document.addEventListener('keydown', (e) => {

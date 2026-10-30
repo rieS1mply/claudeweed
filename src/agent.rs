@@ -96,7 +96,7 @@ impl Agent {
     /// Queues a message for Claude, and says so if it has to wait.
     pub async fn ask(&self, text: String, reply_to: i64) {
         if !self.enabled() {
-            let _ = telegram::reply(&self.tg, reply_to, OFF_TEXT).await;
+            let _ = telegram::reply(&self.tg, reply_to, &crate::i18n::tr(OFF_TEXT)).await;
             return;
         }
         let ahead = self.waiting.fetch_add(1, Ordering::SeqCst) + usize::from(self.busy.load(Ordering::SeqCst));
@@ -104,7 +104,7 @@ impl Agent {
         let _ = self.queue.send(Request { text, reply_to, epoch });
         if ahead > 0 {
             let text = format!("📥 В очереди: Claude сначала закончит {ahead} предыдущ{}. /stop — прервать всё.", if ahead == 1 { "ее" } else { "их" });
-            let _ = telegram::reply(&self.tg, reply_to, &text).await;
+            let _ = telegram::reply(&self.tg, reply_to, &crate::i18n::tr(&text)).await;
         }
     }
 
@@ -142,6 +142,19 @@ impl Agent {
         let session = self.state.lock().unwrap().session.clone();
         let now = if self.busy.load(Ordering::SeqCst) { "работает" } else { "свободен" };
         let waiting = self.waiting.load(Ordering::SeqCst);
+        if crate::i18n::english() {
+            return format!(
+                "Claude in Telegram: {}\nNow: {}{}\nFolder: {}\nConversation: {}",
+                if self.enabled() { "on" } else { "off (at the computer: local-photo --agent on)" },
+                if self.busy.load(Ordering::SeqCst) { "working" } else { "idle" },
+                if waiting > 0 { format!(", {waiting} queued") } else { String::new() },
+                self.dir().display(),
+                match session {
+                    Some(id) => format!("continues ({}…), /new starts a new one", id.chars().take(8).collect::<String>()),
+                    None => "new".into(),
+                }
+            );
+        }
         format!(
             "Claude в Telegram: {}\nСейчас: {now}{}\nПапка: {}\nРазговор: {}",
             if self.enabled() { "включён" } else { "выключен (на компьютере: local-photo --agent on)" },
@@ -170,7 +183,7 @@ impl Agent {
                 if self.enabled() {
                     self.answer(&req).await;
                 } else {
-                    let _ = telegram::reply(&self.tg, req.reply_to, OFF_TEXT).await;
+                    let _ = telegram::reply(&self.tg, req.reply_to, &crate::i18n::tr(OFF_TEXT)).await;
                 }
             }
             self.busy.store(false, Ordering::SeqCst);
@@ -180,7 +193,7 @@ impl Agent {
     async fn answer(&self, req: &Request) {
         let started = Instant::now();
         crate::log!("Claude в Telegram: запрос ({} симв.)", req.text.chars().count());
-        let progress = telegram::send_message(&self.tg, "⏳ Claude думает…", Some(req.reply_to), false).await.ok();
+        let progress = telegram::send_message(&self.tg, &crate::i18n::tr("⏳ Claude думает…"), Some(req.reply_to), false).await.ok();
         let resumed = self.state.lock().unwrap().session.is_some();
         let mut run = self.run(req, progress, started).await;
         if resumed && run.lost_session {
@@ -220,7 +233,7 @@ impl Agent {
     async fn send_answer(&self, answer: &str, reply_to: i64) {
         let pieces = split_message(answer, PIECE);
         if pieces.is_empty() {
-            let _ = telegram::send_message(&self.tg, "(Claude ничего не ответил)", Some(reply_to), false).await;
+            let _ = telegram::send_message(&self.tg, &crate::i18n::tr("(Claude ничего не ответил)"), Some(reply_to), false).await;
             return;
         }
         for (i, piece) in pieces.iter().enumerate() {
@@ -429,27 +442,35 @@ fn explain(error: &str) -> String {
     let error: String = error.trim().chars().take(1500).collect();
     let lower = error.to_lowercase();
     if lower.contains("/login") || lower.contains("api key") || lower.contains("not logged in") {
-        format!("{error}\n\nВойдите в Claude на компьютере: запустите claude и выполните /login.")
+        format!("{error}\n\n{}", crate::i18n::tr("Войдите в Claude на компьютере: запустите claude и выполните /login."))
     } else {
         error
     }
 }
 
 fn progress_text(head: &str, steps: &[String]) -> String {
-    let mut text = head.to_string();
+    let mut text = crate::i18n::tr(head);
     let skipped = steps.len().saturating_sub(STEPS_SHOWN);
     if skipped > 0 {
-        text.push_str(&format!("\n…ещё шагов: {skipped}"));
+        text.push('\n');
+        text.push_str(&crate::i18n::tr(&format!("…ещё шагов: {skipped}")));
     }
     for step in &steps[skipped..] {
         text.push('\n');
-        text.push_str(step);
+        text.push_str(&crate::i18n::tr(step));
     }
     text
 }
 
 fn fmt_duration(d: Duration) -> String {
     let s = d.as_secs();
+    if crate::i18n::english() {
+        return match s {
+            0..60 => format!("{s} s"),
+            60..3600 => format!("{} min {} s", s / 60, s % 60),
+            _ => format!("{} h {} min", s / 3600, s % 3600 / 60),
+        };
+    }
     match s {
         0..60 => format!("{s} с"),
         60..3600 => format!("{} мин {} с", s / 60, s % 60),

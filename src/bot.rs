@@ -31,6 +31,17 @@ Telegram позволяет ботам скачивать файлы до 20 М�
 /status — что сейчас с Claude\n\
 /url — адрес облака";
 
+const HELP_EN: &str = "Send photos, videos or files here: they are saved to the cloud and sorted by date.\n\
+To keep a photo in its original quality, send it \u{201c}as a file\u{201d} (uncompressed).\n\
+Telegram lets bots download files up to 20 MB: upload bigger ones through the site.\n\n\
+Plain text is a conversation with Claude on the computer (when turned on: local-photo --agent on). \
+It can read and change files and run commands; a file's caption goes to it too.\n\n\
+/new \u{2014} start a new conversation with Claude\n\
+/stop \u{2014} stop what Claude is doing\n\
+/dir \u{2014} the folder Claude works in (/dir D:\\Projects to change it)\n\
+/status \u{2014} what Claude is up to\n\
+/url \u{2014} the cloud address";
+
 const COMMANDS: &[(&str, &str)] = &[
     ("new", "Новый разговор с Claude"),
     ("stop", "Прервать работу Claude"),
@@ -141,9 +152,9 @@ async fn handle(app: &App, tg: &TelegramConfig, url: &PublicUrl, agent: &Arc<Age
                 Err(e) => e,
             },
             "/status" => agent.status(),
-            _ => HELP.to_string(),
+            _ => (if crate::i18n::english() { HELP_EN } else { HELP }).to_string(),
         };
-        let _ = telegram::reply(tg, msg_id, &answer).await;
+        let _ = telegram::reply(tg, msg_id, &crate::i18n::tr(&answer)).await;
         return;
     }
 
@@ -169,7 +180,7 @@ async fn handle(app: &App, tg: &TelegramConfig, url: &PublicUrl, agent: &Arc<Age
             format!("❌ Не сохранено: {e:#}")
         }
     };
-    let _ = telegram::reply(tg, msg_id, &text).await;
+    let _ = telegram::reply(tg, msg_id, &crate::i18n::tr(&text)).await;
 
     // A file with a caption is a question about it: Claude gets the caption and where the file is.
     let caption = msg["caption"].as_str().map(str::trim).unwrap_or_default();

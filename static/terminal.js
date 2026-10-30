@@ -55,15 +55,15 @@ function inflater(onData) {
 
 const traffic = { wire: 0, raw: 0 };
 function fmtBytes(n) {
-  if (n < 1024) return `${n} Б`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} КБ`;
-  return `${(n / 1024 / 1024).toFixed(1)} МБ`;
+  if (n < 1024) return `${n} ${t('Б')}`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} ${t('КБ')}`;
+  return `${(n / 1024 / 1024).toFixed(1)} ${t('МБ')}`;
 }
 setInterval(() => {
   if (!traffic.wire) return;
   const ratio = traffic.raw / traffic.wire;
-  $('#term-traffic').textContent = `${fmtBytes(traffic.wire)}${ratio >= 1.2 ? ` · сжатие ×${ratio.toFixed(1)}` : ''}`;
-  $('#term-traffic').title = `Получено ${fmtBytes(traffic.wire)}, без сжатия было бы ${fmtBytes(traffic.raw)}`;
+  $('#term-traffic').textContent = `${fmtBytes(traffic.wire)}${ratio >= 1.2 ? ` · ${t('сжатие')} ×${ratio.toFixed(1)}` : ''}`;
+  $('#term-traffic').title = t('Получено {0}, без сжатия было бы {1}', { 0: fmtBytes(traffic.wire), 1: fmtBytes(traffic.raw) });
 }, 1000);
 
 // ---------- sessions API ----------
@@ -82,7 +82,7 @@ async function api(method, path, body) {
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) { location.replace('/'); throw new Error('logged out'); }
   if (res.status === 404 && path === '/api/terminal/sessions') { showDisabled(); throw new Error('disabled'); }
-  if (!res.ok) throw new Error(data.error || `Ошибка ${res.status}`);
+  if (!res.ok) throw new Error(tServer(data.error) || t('Ошибка {0}', { 0: res.status }));
   return data;
 }
 
@@ -98,7 +98,7 @@ async function refreshSessions() {
 
 async function createSession() {
   if (sessions.length >= maxSessions) {
-    showMessage(`Открыто максимум сеансов (${maxSessions}). Закройте ненужный.`, [['Понятно', () => {}]]);
+    showMessage(t('Открыто максимум сеансов ({0}). Закройте ненужный.', { 0: maxSessions }), [[t('Понятно'), () => {}]]);
     return null;
   }
   try {
@@ -107,7 +107,7 @@ async function createSession() {
     renderTabs();
     return s;
   } catch (e) {
-    if (!stopped) showMessage(e.message, [['Понятно', () => {}]]);
+    if (!stopped) showMessage(e.message, [[t('Понятно'), () => {}]]);
     return null;
   }
 }
@@ -216,9 +216,9 @@ class Pane {
       if (e.code === CLOSE_EXITED) {
         if (this.restarting) { this.restarting = false; return this.connect(); }
         refreshSessions();
-        return this.showOverlay('Сеанс завершён.', [
-          ['Начать заново', () => this.connect()],
-          ['Закрыть сеанс', () => closeSession(this.id, false)],
+        return this.showOverlay(t('Сеанс завершён.'), [
+          [t('Начать заново'), () => this.connect()],
+          [t('Закрыть сеанс'), () => closeSession(this.id, false)],
         ]);
       }
       // Refused before opening: find out whether it's the login or the setting.
@@ -286,9 +286,9 @@ class Pane {
 
   showEmpty() {
     const free = sessions.filter((s) => !panes.some((p) => p.visible && p.id === s.id));
-    const actions = [['Новый сеанс', async () => { const s = await createSession(); if (s) this.show(s.id); }]];
+    const actions = [[t('Новый сеанс'), async () => { const s = await createSession(); if (s) this.show(s.id); }]];
     for (const s of free.slice(0, 3)) actions.push([s.name, () => this.show(s.id)]);
-    this.showOverlay('Пустое окно. Откройте в нём сеанс:', actions);
+    this.showOverlay(t('Пустое окно. Откройте в нём сеанс:'), actions);
   }
 }
 
@@ -304,8 +304,8 @@ function setActive(pane) {
 
 function updateTitle() {
   const name = active && sessionById(active.id)?.name;
-  $('#term-name').textContent = name || 'Терминал';
-  document.title = name ? `${name} — Терминал` : 'Терминал';
+  $('#term-name').textContent = name || t('Терминал');
+  document.title = name ? `${name} — ${t('Терминал')}` : t('Терминал');
 }
 
 /** Phones get one window: four 20-column terminals help nobody. */
@@ -354,12 +354,12 @@ function renderTabs() {
     tab.classList.toggle('current', active?.id === s.id);
     tab.classList.toggle('shown', shown.has(s.id));
     tab.classList.toggle('dead', !s.alive);
-    tab.title = `${s.name}${s.clients > 1 ? ` · подключено окон: ${s.clients}` : ''}\nДвойное нажатие — переименовать`;
+    tab.title = `${s.name}${s.clients > 1 ? ` · ${t('подключено окон: {0}', { 0: s.clients })}` : ''}\n${t('Двойное нажатие — переименовать')}`;
     const name = Object.assign(document.createElement('button'), { type: 'button', className: 'term-tab-name', textContent: s.name });
     name.addEventListener('click', () => openTab(s.id));
     name.addEventListener('dblclick', () => renameSession(s.id));
     longPress(name, () => renameSession(s.id));
-    const x = Object.assign(document.createElement('button'), { type: 'button', className: 'term-tab-close', textContent: '×', title: 'Закрыть сеанс' });
+    const x = Object.assign(document.createElement('button'), { type: 'button', className: 'term-tab-close', textContent: '×', title: t('Закрыть сеанс') });
     x.addEventListener('click', () => closeSession(s.id, true));
     tab.append(name, x);
     tabs.insertBefore(tab, $('#term-new'));
@@ -397,18 +397,18 @@ $('#term-new').addEventListener('click', async () => {
 function renameSession(id) {
   const s = sessionById(id);
   if (!s) return;
-  const name = prompt('Название сеанса', s.name);
+  const name = prompt(t('Название сеанса'), s.name);
   if (!name || name.trim() === s.name) return;
   api('PUT', `/api/terminal/sessions/${id}`, { name })
     .then((info) => { Object.assign(s, info); renderTabs(); })
-    .catch((e) => showMessage(e.message, [['Понятно', () => {}]]));
+    .catch((e) => showMessage(e.message, [[t('Понятно'), () => {}]]));
 }
 
 function closeSession(id, ask) {
   const s = sessionById(id);
   const doClose = () => api('DELETE', `/api/terminal/sessions/${id}`).catch(() => {}).then(() => sessionGone(id));
   if (!ask || !s?.alive) return doClose();
-  showMessage(`Закрыть «${s.name}» и всё, что в нём запущено?`, [['Закрыть', doClose], ['Отмена', () => {}]]);
+  showMessage(t('Закрыть «{0}» и всё, что в нём запущено?', { 0: s.name }), [[t('Закрыть'), doClose], [t('Отмена'), () => {}]]);
 }
 
 /** The session was closed here or elsewhere: its windows take another one or go empty. */
@@ -425,8 +425,8 @@ async function sessionGone(id) {
 const overlay = $('#term-overlay');
 
 function fillMessage(box, text, actions, html) {
-  const t = $('.term-msg-text', box);
-  if (html) t.innerHTML = text; else t.textContent = text;
+  const msg = $('.term-msg-text', box);
+  if (html) msg.innerHTML = text; else msg.textContent = text;
   const row = $('.term-msg-actions', box);
   row.replaceChildren();
   actions.forEach(([label, fn], i) => {
@@ -443,7 +443,7 @@ function showDisabled() {
   stopped = true;
   for (const p of panes) p.disconnect();
   $('#term-dot').dataset.state = 'closed';
-  showMessage('Терминал выключен. Включить его можно только на самом компьютере:<br><code>local-photo --terminal on</code>', [], true);
+  showMessage(t('Терминал выключен. Включить его можно только на самом компьютере:<br><code>local-photo --terminal on</code>'), [], true);
 }
 
 /** False (and handles it) if logged out or the terminal is off. */
@@ -558,15 +558,16 @@ $('#term-layout').addEventListener('click', () => {
 
 $('#term-restart').addEventListener('click', () => {
   if (active?.id == null) return;
-  showMessage('Закрыть оболочку в этом окне и всё, что в ней запущено, и начать заново?', [
-    ['Перезапустить', () => active.restart()],
-    ['Отмена', () => {}],
+  showMessage(t('Закрыть оболочку в этом окне и всё, что в ней запущено, и начать заново?'), [
+    [t('Перезапустить'), () => active.restart()],
+    [t('Отмена'), () => {}],
   ]);
 });
 
 // ---------- start ----------
 
 (async () => {
+  translatePage();
   if (!(await allowed())) return;
   await refreshSessions();
   if (stopped) return;

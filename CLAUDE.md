@@ -82,8 +82,16 @@ local-photo.exe), `--stop` убьёт и терминал, и самого Claud
 | `src/terminal.rs` | до 8 именованных PTY-сеансов (ConPTY на Windows), история, deflate-сжатие вывода; REST `/api/terminal/sessions` + WebSocket `/api/terminal?id=N` |
 | `src/terminal_store.rs` | сеансы переживают перезапуск: раз в 15 с пишутся в `<настройки>/terminal/` (имя, папка, вывод, запущенный Claude); при старте оболочки возвращаются, в них вводится `claude --resume <id>`. Папку PowerShell сообщает своим приглашением (OSC 7). Убирает переменные `CLAUDE_CODE_*` из окружения оболочек |
 | `src/runner.rs` | запуск кода (как онлайн-компилятор): таблица `LANGS`, поиск инструментов `which`, лимиты, NDJSON-поток `/api/run`, `/api/run/langs` |
-| `src/trash.rs`, `src/notes.rs`, `src/zips.rs`, `src/thumbs.rs` | корзина 30 дней, заметки, ZIP, превью |
+| `src/trash.rs`, `src/notes.rs`, `src/zips.rs`, `src/thumbs.rs` | корзина 30 дней, заметки, ZIP, превью (`store_preview` — JPEG для HEIC, присланный браузером) |
+| `src/search.rs` | поиск по тексту заметок и текстовых файлов (`/api/search`) |
+| `src/shares.rs` | ссылки без пароля: `shares.json` в папке настроек; публичные маршруты `/s/{token}`, `/api/s/{token}/…` в `web.rs` (вне `protected`) |
+| `src/i18n.rs`, `src/lang_en.rs` | язык консоли/Telegram (`--lang`), `say!`, `tr()` |
+| свои папки | `storage::folders`/`folder_name` (папки верхнего уровня, кроме годов), `/api/folder`, `/api/file/move`; `prune_empty_dirs` их не удаляет |
+| автозагрузка | `POST /api/auto-upload` с `Authorization: Bearer` (ключ `--upload-token new`, в конфиге SHA-256), вне `protected`; повтор (имя+размер в месяце) пропускается |
 | `static/app.js` | ядро интерфейса, поиск, клавиши; `editor.js` (фото + редактор кода), `runner.js` (запуск кода, песочница, шаблоны `RUN_TEMPLATES`), `notes.js`, `trash.js`, `select.js`, `terminal.js` — разделы; `highlight.js` — сторонний, не править |
+| `static/i18n.js`, `static/lang-en.js` | подключаются первыми: `t()`, `tServer()`, `plural()`, `translatePage()` (переводит тексты из HTML) |
+| `static/extras.js` | свои папки, ссылки, HEIC-превью из браузера, просмотр PDF/аудио/Markdown, поиск по содержимому; `markdown.js` — Markdown → DOM без innerHTML |
+| `static/share.html`, `share.js`, `share.css` | страница для получателя ссылки |
 | `static/start.js` | подключается последним и запускает приложение |
 
 Новый API-маршрут: обработчик в `web.rs`, регистрация в `router()` внутри `protected`
@@ -95,6 +103,18 @@ local-photo.exe), `--stop` убьёт и терминал, и самого Claud
 - Сервер слушает только `127.0.0.1`. Всё снаружи идёт через туннель.
 - Любой путь от клиента — только через `storage::resolve` / `safe_join`; имена — через `sanitize_filename`.
 - Отдача файлов: inline только фото/видео, остальное `attachment` + `CSP sandbox` (загруженный .html не должен исполняться).
+  Исключение — PDF с `view=1` (`serve_pdf`): без sandbox (иначе браузер его не покажет), но
+  тип жёстко `application/pdf` + `nosniff`.
+- Markdown рендерится только через DOM (`markdown.js`), никакого innerHTML с текстом файла.
+
+## Проверка интерфейса без браузерной панели
+
+Node есть в VS Code: `ELECTRON_RUN_AS_NODE=1 "%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"`
+(`--check file.js` — синтаксис). Headless Edge (`msedge --headless=new --remote-debugging-port=…`)
+управляется через CDP по WebSocket из этого Node — так проверялась сессия 11 (2026-10-30) (скрипт `cdp.js` был
+во временной папке; при нужде написать заново: evaluate + captureScreenshot). Локаль headless Edge
+английская — сайт открывается на английском, для русского `localStorage['lp-lang']='ru'`.
+Кириллица в аргументах curl из Git Bash портится — запросы к API слать из Python.
 - Удаление = перенос в корзину, не `remove_file`.
 - Тяжёлая работа с диском/картинками — в `spawn_blocking`; размещение файлов под `place_lock`.
 - CSP запрещает inline-скрипты и стили (кроме страницы терминала): никаких `onclick=""` и `<style>` в HTML.
@@ -110,7 +130,12 @@ local-photo.exe), `--stop` убьёт и терминал, и самого Claud
 
 ## Стиль
 
-- Тексты для пользователя (интерфейс, ошибки API, журнал, Telegram) — по-русски.
+- Тексты для пользователя пишутся по-русски, но **через словарь**: на сайте `t('Текст')` /
+  `t('Найдено {0} из {1}', { 0: a, 1: b })` (i18n.js), английский — в `static/lang-en.js`
+  (ключ — русский текст). Ошибки API остаются русским текстом, страница переводит их через
+  `tServer()` (шаблоны `{x}` в lang-en.js). Консоль — `say!` вместо `println!`, Telegram —
+  `i18n::tr()`; английские тексты в `src/lang_en.rs` (`{}` на месте значений). Новый текст —
+  сразу строка в словаре. Журнал (`log!`) — только по-русски. Не называть локальные переменные `t`.
 - Комментарии и имена в коде — по-английски, коротко, объясняют «почему».
 - Окончания строк LF (`.gitattributes`). Новые зависимости — только при реальной нужде.
 - Перед коммитом: `cargo test --release` и `cargo clippy --release --all-targets` без предупреждений.

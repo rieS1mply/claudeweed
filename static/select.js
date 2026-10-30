@@ -60,7 +60,7 @@ function exitSelection() {
   dock.classList.remove('away');
   dock.getAnimations().forEach((a) => a.cancel());
   animate(dock, [{ opacity: 0, transform: 'translateY(30px)' }, { opacity: 1, transform: 'none' }], 'bouncy', { fill: 'none' });
-  $('#select-btn').textContent = 'Выбрать';
+  $('#select-btn').textContent = t('Выбрать');
   showSectionHeader();
   if (state.data[state.section]) render();
 }
@@ -70,19 +70,19 @@ function updateSelectionUi() {
   if (!sel.on) return;
   const n = sel.keys.size;
   const all = (state.flat || []).length;
-  $('#page-title').textContent = n ? `Выбрано: ${n}` : 'Выберите объекты';
+  $('#page-title').textContent = n ? t('Выбрано: {0}', { 0: n }) : t('Выберите объекты');
   $('#nav-title').textContent = $('#page-title').textContent;
-  $('#select-btn').textContent = 'Отменить';
+  $('#select-btn').textContent = t('Отменить');
   const action = $('#head-action');
   action.hidden = !all;
-  action.textContent = n === all ? 'Снять все' : 'Выбрать все';
+  action.textContent = n === all ? t('Снять все') : t('Выбрать все');
   headAction = () => {
     const on = sel.keys.size !== all;
     for (const item of state.flat || []) setSelected(item, on);
     updateSelectionUi();
   };
   const size = selectedItems().reduce((s, i) => s + i.size, 0);
-  $('#summary').textContent = n ? fmtSize(size) : 'Нажмите на фото или проведите по ним пальцем';
+  $('#summary').textContent = n ? fmtSize(size) : t('Нажмите на фото или проведите по ним пальцем');
   for (const b of ['#sel-share', '#sel-download', '#sel-delete']) $(b).disabled = !n;
   $('#sel-share').hidden = !CAN_SHARE_FILES;
 }
@@ -193,7 +193,7 @@ async function deleteSelected() {
   const n = items.length;
   if (!n) return;
   const what = section === 'photos' ? plural(n, 'объект', 'объекта', 'объектов') : plural(n, 'файл', 'файла', 'файлов');
-  if (!(await confirmDialog(`${n} ${what} будут перемещены в корзину на 30 дней.`, { title: 'Удалить выбранное?' }))) return;
+  if (!(await confirmDialog(t('{0} {1} будут перемещены в корзину на 30 дней.', { 0: n, 1: what }), { title: t('Удалить выбранное?') }))) return;
 
   const ids = [];
   let failed = 0;
@@ -215,13 +215,13 @@ async function deleteSelected() {
   exitSelection();
   await load(section);
   const done = ids.length;
-  toast(failed ? `В корзину: ${done}, не удалось: ${failed}` : `Перемещено в корзину: ${done}`, {
-    action: 'Отменить',
+  toast(failed ? t('В корзину: {0}, не удалось: {1}', { 0: done, 1: failed }) : t('Перемещено в корзину: {0}', { 0: done }), {
+    action: t('Отменить'),
     onAction: async () => {
       await Promise.all(ids.map((id) => api.restore(id).catch(() => {})));
       state.data.trash = null;
       await load(section);
-      toast('Восстановлено');
+      toast(t('Восстановлено'));
     },
   });
 }
@@ -236,13 +236,13 @@ async function downloadSelected() {
     const { id } = await api.zipStart(section, items.map((i) => i.path));
     for (;;) {
       const st = await api.zipStatus(id);
-      if (st.state === 'failed') throw new Error(st.error || 'Не удалось собрать архив');
+      if (st.state === 'failed') throw new Error(st.error || t('Не удалось собрать архив'));
       if (st.state === 'ready') break;
-      toast(`Собираю архив… ${st.total ? Math.floor((st.done / st.total) * 100) : 0}%`);
+      toast(t('Собираю архив… {0}%', { 0: st.total ? Math.floor((st.done / st.total) * 100) : 0 }));
       await new Promise((r) => setTimeout(r, 700));
     }
-    toast('Архив готов');
-    triggerDownload(api.zipFileUrl(id), 'Облако.zip');
+    toast(t('Архив готов'));
+    triggerDownload(api.zipFileUrl(id), t('Облако.zip'));
     exitSelection();
   } catch (e) {
     toast(e.message);
@@ -255,22 +255,22 @@ async function shareSelected() {
   const items = selectedItems();
   if (!items.length) return;
   const total = items.reduce((s, i) => s + i.size, 0);
-  if (total > 1.5 * 1024 ** 3) return toast('Слишком много за один раз — выберите меньше (до 1,5 ГБ)');
+  if (total > 1.5 * 1024 ** 3) return toast(t('Слишком много за один раз — выберите меньше (до 1,5 ГБ)'));
   try {
     const files = [];
     for (const [i, item] of items.entries()) {
-      toast(`Подготовка ${i + 1} из ${items.length}…`);
+      toast(t('Подготовка {0} из {1}…', { 0: i + 1, 1: items.length }));
       files.push(await prepareShare(section, item));
     }
-    if (!navigator.canShare?.({ files })) throw new Error('Телефон не может поделиться этими файлами');
-    toast(`Готово: ${files.length}`, {
-      action: 'Сохранить',
+    if (!navigator.canShare?.({ files })) throw new Error(t('Телефон не может поделиться этими файлами'));
+    toast(t('Готово: {0}', { 0: files.length }), {
+      action: t('Сохранить'),
       onAction: async () => {
         try {
           await navigator.share({ files });
           exitSelection();
         } catch (e) {
-          if (e.name !== 'AbortError') toast('Не удалось открыть меню «Поделиться»');
+          if (e.name !== 'AbortError') toast(t('Не удалось открыть меню «Поделиться»'));
         }
       },
     });

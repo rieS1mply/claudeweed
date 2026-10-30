@@ -264,7 +264,7 @@ pub fn hash_password(password: &str) -> Result<String> {
 }
 
 pub fn ask(prompt: &str) -> Result<String> {
-    print!("{prompt}");
+    print!("{}", crate::i18n::tr(prompt));
     io::stdout().flush()?;
     let mut line = String::new();
     if io::stdin().lock().read_line(&mut line)? == 0 {
@@ -278,7 +278,7 @@ pub fn ask(prompt: &str) -> Result<String> {
 pub fn ask_password(prompt: &str) -> Result<String> {
     // Hidden input in a real terminal; plain line when input is piped (scripts, tests).
     if io::stdin().is_terminal() {
-        Ok(rpassword::prompt_password(prompt)?)
+        Ok(rpassword::prompt_password(crate::i18n::tr(prompt))?)
     } else {
         ask(prompt)
     }
@@ -315,25 +315,25 @@ fn has_storage(dir: &Path) -> bool {
 
 /// Asks where to keep the photos, creates the folder and checks it is writable.
 fn choose_storage(previous: Option<&Path>, suggestion: &Path) -> Result<PathBuf> {
-    println!("Где хранить фото и файлы?");
-    println!("Можно выбрать любую папку, в том числе на другом или внешнем диске.");
-    println!("Впишите путь или перетащите папку в это окно.");
+    crate::say!("Где хранить фото и файлы?");
+    crate::say!("Можно выбрать любую папку, в том числе на другом или внешнем диске.");
+    crate::say!("Впишите путь или перетащите папку в это окно.");
     let default = previous.unwrap_or(suggestion);
     loop {
         let answer = ask(&format!("Папка (Enter — {}): ", default.display()))?;
         let dir = if answer.is_empty() { default.to_path_buf() } else { parse_folder(&answer) };
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            println!("  Не удалось создать папку: {e}. Попробуйте другую.");
+            crate::say!("  Не удалось создать папку: {e}. Попробуйте другую.");
             continue;
         }
         let probe = dir.join(".local-photo-write-test");
         if std::fs::write(&probe, b"ok").and_then(|_| std::fs::remove_file(&probe)).is_err() {
-            println!("  В эту папку нельзя записывать. Выберите другую.");
+            crate::say!("  В эту папку нельзя записывать. Выберите другую.");
             continue;
         }
         let dir = dir.canonicalize().unwrap_or(dir);
         if has_storage(&dir) {
-            println!("  В папке уже есть хранилище — оно и будет использоваться.");
+            crate::say!("  В папке уже есть хранилище — оно и будет использоваться.");
         }
         return Ok(dir);
     }
@@ -345,14 +345,14 @@ fn offer_move(old: &Path, new: &Path) -> Result<()> {
         return Ok(());
     }
     if has_storage(new) {
-        println!("  В старой папке тоже есть файлы ({}). Они не тронуты — перенесите вручную, если нужно.", old.display());
+        crate::say!("  В старой папке тоже есть файлы ({}). Они не тронуты — перенесите вручную, если нужно.", old.display());
         return Ok(());
     }
     if !ask_yes(&format!("Перенести фото и файлы из {} в новую папку? [Д/н]: ", old.display()))? {
-        println!("  Старые файлы остались в {}.", old.display());
+        crate::say!("  Старые файлы остались в {}.", old.display());
         return Ok(());
     }
-    println!("  Переношу… (с одного диска на другой это может занять время)");
+    crate::say!("  Переношу… (с одного диска на другой это может занять время)");
     for name in crate::storage::Section::ALL.iter().map(|s| s.dir_name()).chain([NOTES_DIR, SYSTEM_DIR]) {
         let from = old.join(name);
         if !from.exists() {
@@ -365,15 +365,15 @@ fn offer_move(old: &Path, new: &Path) -> Result<()> {
         }
         move_tree(&from, &to).with_context(|| format!("перенос {}", from.display()))?;
     }
-    println!("  Готово.");
+    crate::say!("  Готово.");
     Ok(())
 }
 
 /// Interactive setup: storage folder, login, password and (optionally) the Telegram bot.
 pub async fn setup(path: &Path, previous: Option<&Config>, suggestion: Option<&Path>) -> Result<Config> {
-    println!();
-    println!("=== Настройка домашнего облака ===");
-    println!();
+    crate::say!();
+    crate::say!("=== Настройка домашнего облака ===");
+    crate::say!();
 
     let old_storage = previous.and_then(|c| c.storage_dir.clone());
     let fallback = default_storage_dir();
@@ -381,12 +381,12 @@ pub async fn setup(path: &Path, previous: Option<&Config>, suggestion: Option<&P
     if let Some(old) = &old_storage {
         offer_move(old, &storage_dir)?;
     }
-    println!();
+    crate::say!();
 
     let username = loop {
         let name = ask("Логин для входа на сайт: ")?;
         if name.is_empty() {
-            println!("  Логин не может быть пустым.");
+            crate::say!("  Логин не может быть пустым.");
         } else {
             break name;
         }
@@ -395,21 +395,21 @@ pub async fn setup(path: &Path, previous: Option<&Config>, suggestion: Option<&P
     let password = loop {
         let p1 = ask_password("Пароль (минимум 10 символов): ")?;
         if p1.chars().count() < 10 {
-            println!("  Слишком короткий пароль — сайт будет открыт в интернет, нужен надёжный.");
+            crate::say!("  Слишком короткий пароль — сайт будет открыт в интернет, нужен надёжный.");
             continue;
         }
         let p2 = ask_password("Повторите пароль: ")?;
         if p1 != p2 {
-            println!("  Пароли не совпадают, попробуйте ещё раз.");
+            crate::say!("  Пароли не совпадают, попробуйте ещё раз.");
             continue;
         }
         break p1;
     };
 
-    println!();
-    println!("Telegram: программа будет присылать адрес сайта при каждом запуске,");
-    println!("а фото и файлы, отправленные боту, сохранятся в облако.");
-    println!("Создайте бота у @BotFather (команда /newbot) и вставьте сюда его токен.");
+    crate::say!();
+    crate::say!("Telegram: программа будет присылать адрес сайта при каждом запуске,");
+    crate::say!("а фото и файлы, отправленные боту, сохранятся в облако.");
+    crate::say!("Создайте бота у @BotFather (команда /newbot) и вставьте сюда его токен.");
     let telegram = loop {
         let token = ask("Токен бота (Enter — пропустить): ")?;
         if token.is_empty() {
@@ -417,11 +417,11 @@ pub async fn setup(path: &Path, previous: Option<&Config>, suggestion: Option<&P
         }
         match connect_telegram(&token).await {
             Ok(tg) => break Some(tg),
-            Err(e) => println!("  Не получилось: {e:#}. Попробуйте снова или нажмите Enter, чтобы пропустить."),
+            Err(e) => crate::say!("  Не получилось: {e:#}. Попробуйте снова или нажмите Enter, чтобы пропустить."),
         }
     };
 
-    println!();
+    crate::say!();
     let terminal = ask_terminal()?;
 
     let config = Config {
@@ -441,28 +441,28 @@ pub async fn setup(path: &Path, previous: Option<&Config>, suggestion: Option<&P
         lang: previous.and_then(|c| c.lang.clone()),
     };
     config.save(path)?;
-    println!();
-    println!("Хранилище:  {}", storage_dir.display());
-    println!("Настройки:  {}", path.display());
-    println!("Поменять папку, пароль или бота: запустите программу с флагом --setup");
-    println!("(или исправьте storage_dir в файле настроек).");
-    println!();
+    crate::say!();
+    crate::say!("Хранилище:  {}", storage_dir.display());
+    crate::say!("Настройки:  {}", path.display());
+    crate::say!("Поменять папку, пароль или бота: запустите программу с флагом --setup");
+    crate::say!("(или исправьте storage_dir в файле настроек).");
+    crate::say!();
     Ok(config)
 }
 
 /// Shown at setup; the owner of the computer decides.
 fn ask_terminal() -> Result<bool> {
-    println!("Терминал: с сайта можно будет выполнять любые команды на этом компьютере");
-    println!("(с ноутбука или телефона). Кто знает пароль — управляет компьютером.");
-    println!("О каждом входе в терминал придёт сообщение в Telegram.");
+    crate::say!("Терминал: с сайта можно будет выполнять любые команды на этом компьютере");
+    crate::say!("(с ноутбука или телефона). Кто знает пароль — управляет компьютером.");
+    crate::say!("О каждом входе в терминал придёт сообщение в Telegram.");
     let on = ask("Включить терминал на сайте? [д/Н]: ")?;
     Ok(matches!(on.to_lowercase().as_str(), "д" | "да" | "y" | "yes"))
 }
 
 async fn connect_telegram(token: &str) -> Result<TelegramConfig> {
     let bot = telegram::get_me(token).await.context("токен не подходит")?;
-    println!("  Бот найден: @{bot}");
-    println!("  Откройте этого бота в Telegram и отправьте ему /start (жду до 10 минут)…");
+    crate::say!("  Бот найден: @{bot}");
+    crate::say!("  Откройте этого бота в Telegram и отправьте ему /start (жду до 10 минут)…");
 
     // Skip whatever the bot received before this moment.
     let mut offset = telegram::latest_update_id(token).await?.map_or(0, |id| id + 1);
@@ -471,7 +471,7 @@ async fn connect_telegram(token: &str) -> Result<TelegramConfig> {
         let (next, chat) = telegram::wait_for_chat(token, offset).await?;
         offset = next;
         if let Some((chat_id, who)) = chat {
-            println!("  Получено сообщение от {who}.");
+            crate::say!("  Получено сообщение от {who}.");
             let tg = TelegramConfig { token: token.to_string(), chat_id };
             telegram::send(&tg, "Бот подключён. Сюда будет приходить адрес облака при каждом запуске.").await?;
             return Ok(tg);
