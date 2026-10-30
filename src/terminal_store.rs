@@ -115,10 +115,28 @@ pub fn inherited_agent_vars() -> Vec<std::ffi::OsString> {
 const PS_HOOK: &str = "$global:__lpPrompt = $function:prompt; \
     function global:prompt { [Console]::Write([char]27 + ']7;' + $PWD.ProviderPath + [char]7); & $global:__lpPrompt }";
 
-/// `-EncodedCommand` argument for [`PS_HOOK`]: base64 of UTF-16LE, no quoting troubles.
+/// The `cmds` function: the cheat sheet of [`COMMANDS`] in the shell.
+const PS_CMDS: &str = include_str!("cmds.ps1");
+
+/// `-EncodedCommand` argument for [`PS_HOOK`] and [`PS_CMDS`]: base64 of UTF-16LE, no
+/// quoting troubles, and no execution policy (a `.ps1` file is refused by default).
 pub fn ps_hook_encoded() -> String {
-    let utf16: Vec<u8> = PS_HOOK.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let script = format!("{PS_HOOK}\n{PS_CMDS}");
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     base64(&utf16)
+}
+
+/// Terminal commands with descriptions; the terminal page shows the same list (button "?").
+const COMMANDS: &str = include_str!("../static/commands.json");
+
+/// The list for `cmds` (`LP_CMDS`), written once per run; None if that failed.
+pub fn commands_file() -> Option<&'static Path> {
+    static FILE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    FILE.get_or_init(|| {
+        let path = std::env::temp_dir().join("local-photo-commands.json");
+        std::fs::write(&path, COMMANDS).ok().map(|_| path)
+    })
+    .as_deref()
 }
 
 fn base64(bytes: &[u8]) -> String {
@@ -356,6 +374,19 @@ mod tests {
         assert_eq!(base64(b"fo"), "Zm8=");
         assert_eq!(base64(b"foo"), "Zm9v");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    /// `cmds` and the page's cheat sheet both read these fields; a typo would hide an entry.
+    #[test]
+    fn command_list_is_complete() {
+        let list: Vec<HashMap<String, String>> = serde_json::from_str(COMMANDS).unwrap();
+        assert!(list.len() > 50);
+        for entry in &list {
+            for field in ["g", "ge", "cmd", "ru", "en"] {
+                assert!(entry.get(field).is_some_and(|v| !v.trim().is_empty()), "{field} in {entry:?}");
+            }
+            assert_eq!(entry.len(), 5, "{entry:?}");
+        }
     }
 
     #[test]

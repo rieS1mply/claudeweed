@@ -25,6 +25,9 @@
     <span class="term-traffic" id="term-traffic"></span>
   </div>
   <div class="term-tools">
+    <button class="btn glass round" id="term-help" type="button" title="Шпаргалка команд">
+      <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6"/><path d="M12 17.2v.1"/></svg>
+    </button>
     <button class="btn glass round" id="term-smaller" type="button" title="Мельче">
       <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M6 12h12"/></svg>
     </button>
@@ -69,6 +72,20 @@
   <button data-key="/">/</button>
   <button data-key="-">-</button>
 </nav>
+
+<!-- Cheat sheet: the same list as `cmds` in the shell (commands.json). -->
+<div class="cheat" id="cheat" hidden>
+  <div class="cheat-box glass" role="dialog" aria-label="Шпаргалка команд">
+    <div class="cheat-head">
+      <input id="cheat-q" type="search" placeholder="Поиск: git, удалить, папка…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button class="btn glass round" id="cheat-close" type="button" title="Закрыть">
+        <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="cheat-list" id="cheat-list"></div>
+    <p class="cheat-hint">Нажмите на команду — она появится в терминале. В самом терминале то же: cmds</p>
+  </div>
+</div>
 
 <template id="pane-tpl">
   <section class="term-pane">

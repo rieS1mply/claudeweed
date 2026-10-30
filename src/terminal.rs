@@ -316,6 +316,10 @@ fn default_shell(cwd: Option<&Path>) -> CommandBuilder {
         let mut c = CommandBuilder::new("powershell.exe");
         // The prompt reports its folder, so the session can come back there after a restart.
         c.args(["-NoLogo", "-NoExit", "-EncodedCommand", &store::ps_hook_encoded()]);
+        if let Some(file) = store::commands_file() {
+            c.env("LP_CMDS", file);
+        }
+        c.env("LP_LANG", if crate::i18n::english() { "en" } else { "ru" });
         c
     };
     #[cfg(not(windows))]

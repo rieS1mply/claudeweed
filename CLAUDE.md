@@ -65,7 +65,10 @@ local-photo.exe), `--stop` убьёт и терминал, и самого Claud
 тремя шагами внутри. Проверено 2026-10-30: запускать через WMI
 (`Invoke-CimMethod Win32_Process -MethodName Create`, родитель — WmiPrvSE, вне дерева терминала),
 каждую команду облака в скрипте — через `cmd /c "… < NUL >> deploy.log 2>&1"`: в скрытом окне
-`--autostart on` иначе вечно ждёт «Нажмите Enter». Готовый скрипт — `.dev/deploy.ps1`
+`--autostart on` иначе вечно ждёт «Нажмите Enter». Запущенное так облако наследует файл
+вывода `--autostart on` и держит его открытым до остановки — журнал выкатки каждый раз новый
+(`.dev/deploy-<время>.log`), иначе следующая выкатка молча ничего не сделает (так было
+2026-10-30). Готовый скрипт — `.dev/deploy.ps1`
 (ждёт 60 с, чтобы успеть ответить; после перезапуска разговор восстанавливается в терминале).
 
 ## Устройство
@@ -85,6 +88,7 @@ local-photo.exe), `--stop` убьёт и терминал, и самого Claud
 | `src/agent.rs`, `src/agent_text.rs` | Claude в Telegram (`--agent on`): текст владельца → `claude -p --permission-mode auto --resume <id>` (stream-json), шаги в обновляемом сообщении, очередь, `/stop`, `/new`, `/dir`; разговор и папка в `agent.json`. `agent_text` — Markdown → HTML Telegram, разбиение на части, подписи к шагам |
 | `src/terminal.rs` | до 8 именованных PTY-сеансов (ConPTY на Windows), история, deflate-сжатие вывода; REST `/api/terminal/sessions` + WebSocket `/api/terminal?id=N` |
 | `src/terminal_store.rs` | сеансы переживают перезапуск: раз в 15 с пишутся в `<настройки>/terminal/` (имя, папка, вывод, запущенный Claude); при старте оболочки возвращаются, в них вводится `claude --resume <id>`. Папку PowerShell сообщает своим приглашением (OSC 7). Убирает переменные `CLAUDE_CODE_*` из окружения оболочек |
+| шпаргалка команд | `static/commands.json` — один список для `cmds` в оболочке (`src/cmds.ps1`, входит в `-EncodedCommand`, список — файл `LP_CMDS` из `terminal_store::commands_file`) и для кнопки «?» на странице терминала. Новая команда — строка в JSON (поля g, ge, cmd, ru, en) |
 | `src/runner.rs` | запуск кода (как онлайн-компилятор): таблица `LANGS`, поиск инструментов `which`, лимиты, NDJSON-поток `/api/run`, `/api/run/langs` |
 | `src/trash.rs`, `src/notes.rs`, `src/zips.rs`, `src/thumbs.rs` | корзина 30 дней, заметки, ZIP, превью (`store_preview` — JPEG для HEIC, присланный браузером) |
 | `src/search.rs` | поиск по тексту заметок и текстовых файлов (`/api/search`) |

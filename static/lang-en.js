@@ -192,4 +192,6 @@ I18N.en = {
   'Превью нужно только для HEIC и похожих форматов': 'Previews are only for HEIC and similar formats',
   'Превью не принято: {x}': 'Preview refused: {x}', 'Превью не принято': 'Preview refused', 'Неверный ключ загрузки': 'Wrong upload key',
   'Не хватает места на диске': 'Not enough disk space', 'Пустой файл': 'Empty file', 'Файл не принят: {x}': 'File refused: {x}',
+  'Шпаргалка команд': 'Command cheat sheet', 'Поиск: git, удалить, папка…': 'Search: git, delete, folder…',
+  'Нажмите на команду — она появится в терминале. В самом терминале то же: cmds': 'Tap a command to type it into the terminal. In the terminal itself: cmds',
 };

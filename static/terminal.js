@@ -594,6 +594,89 @@ $('#term-restart').addEventListener('click', () => {
   ]);
 });
 
+// ---------- cheat sheet: the same list as `cmds` in the shell ----------
+
+const cheat = $('#cheat');
+const cheatList = $('#cheat-list');
+const cheatQuery = $('#cheat-q');
+let commands = null;
+/** Keys (Ctrl+C, Tab, ↑ ↓, Esc) are shown, not typed in. */
+const isKey = (cmd) => /^(Ctrl\+|Shift\+|Alt\+|Tab$|Esc$|[↑↓←→])/.test(cmd);
+const fold = (s) => s.toLowerCase().replaceAll('ё', 'е');
+
+async function openCheat() {
+  cheat.hidden = false;
+  if (!commands) {
+    try {
+      const res = await fetch('commands.json');
+      commands = res.ok ? await res.json() : [];
+    } catch { commands = []; }
+  }
+  renderCheat();
+  if (!touch) cheatQuery.focus();
+}
+
+function closeCheat() {
+  cheat.hidden = true;
+  if (!touch) active?.term.focus();
+}
+
+function renderCheat() {
+  const words = fold(cheatQuery.value).split(/\s+/).filter(Boolean);
+  const en = LANG !== 'ru';
+  const rows = [];
+  let group = null;
+  for (const c of commands || []) {
+    if (!words.every((w) => fold([c.g, c.ge, c.cmd, c.ru, c.en].join(' ')).includes(w))) continue;
+    const name = en ? c.ge : c.g;
+    if (name !== group) {
+      group = name;
+      const h = document.createElement('h3');
+      h.textContent = name;
+      rows.push(h);
+    }
+    const key = isKey(c.cmd);
+    const row = document.createElement(key ? 'div' : 'button');
+    row.className = 'cheat-row';
+    const code = document.createElement('code');
+    code.textContent = c.cmd;
+    const about = document.createElement('span');
+    about.textContent = en ? c.en : c.ru;
+    row.append(code, about);
+    if (!key) {
+      row.type = 'button';
+      row.addEventListener('click', () => insertCommand(c.cmd));
+    }
+    rows.push(row);
+  }
+  if (!rows.length) {
+    const p = document.createElement('p');
+    p.className = 'cheat-empty';
+    p.textContent = t('Ничего не найдено');
+    rows.push(p);
+  }
+  cheatList.replaceChildren(...rows);
+  cheatList.scrollTop = 0;
+}
+
+/** Types the command without Enter: placeholders like <папка> need filling in first. */
+function insertCommand(cmd) {
+  closeCheat();
+  if (active?.id == null) return;
+  active.sendInput(cmd);
+  active.term.focus();
+}
+
+$('#term-help').addEventListener('click', openCheat);
+$('#cheat-close').addEventListener('click', closeCheat);
+cheatQuery.addEventListener('input', renderCheat);
+cheat.addEventListener('click', (e) => { if (e.target === cheat) closeCheat(); });
+cheat.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeCheat();
+  // Enter in the search box types the only (or first) match.
+  if (e.key === 'Enter' && e.target === cheatQuery) $('button.cheat-row', cheatList)?.click();
+});
+
 // ---------- start ----------
 
 (async () => {
