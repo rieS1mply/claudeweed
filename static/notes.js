@@ -40,7 +40,7 @@ function renderNotes(list) {
       el('div', { class: 'hint', text: 'Нажмите «+», чтобы создать. Заметки доступны с любого устройства' })));
     return;
   }
-  const found = filterByQuery(list.items, (note) => `${note.title}\n${note.preview || ''}`);
+  const found = filterByQuery(list.items, (note) => `${note.title}\n${note.preview || ''}`, (note) => contentSnippet('notes', note.id));
   if (found.length !== n) $('#summary').textContent = `Найдено ${found.length} из ${n}`;
   if (!found.length) return content.replaceChildren(nothingFound());
   const groups = new Map();
@@ -57,7 +57,7 @@ function renderNotes(list) {
         el('div', { class: 'note-title', text: note.title }),
         el('div', { class: 'note-meta' },
           el('span', { class: 'note-date', text: noteDate(note.updated) }),
-          el('span', { class: 'note-preview', text: note.preview || 'Нет дополнительного текста' })))))));
+          el('span', { class: 'note-preview', text: contentSnippet('notes', note.id) ?? (note.preview || 'Нет дополнительного текста') })))))));
   }
   content.replaceChildren(frag);
 }

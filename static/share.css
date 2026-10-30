@@ -1,0 +1,16 @@
+/* Page behind a share link; the rest comes from style.css. */
+.share { width: min(1100px, 100%); margin: 0 auto; padding: max(16px, env(safe-area-inset-top)) 16px 40px; }
+.share-head { margin-bottom: 16px; }
+.share-head .brand { color: var(--subtle); font-size: 14px; margin-bottom: 4px; }
+.share .files { margin-top: 16px; }
+.share .file-row { cursor: default; }
+.share .file-row .btn.link { flex-shrink: 0; }
+.share .tile img.loaded { opacity: 1; }
+.share-view { position: fixed; inset: 0; z-index: 60; background: #000; display: grid; place-items: center; }
+.share-stage { width: 100%; height: 100%; display: grid; place-items: center; }
+.share-stage img, .share-stage video { max-width: 100%; max-height: 100%; object-fit: contain; }
+.share-close { position: fixed; top: max(12px, env(safe-area-inset-top)); right: 12px; z-index: 2; }
+.share-dl {
+  position: fixed; bottom: max(16px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%);
+  padding: 10px 22px; border-radius: 999px; z-index: 2;
+}

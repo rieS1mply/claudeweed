@@ -63,13 +63,6 @@ function fmtDate(ms) {
   return `${d.getDate()} ${MONTHS_GEN[d.getMonth()]} ${d.getFullYear()}, ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function plural(n, one, few, many) {
-  const m10 = n % 10, m100 = n % 100;
-  if (m10 === 1 && m100 !== 11) return one;
-  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
-  return many;
-}
-
 const qs = (obj) => new URLSearchParams(obj).toString();
 
 // ---------- motion ----------
@@ -402,12 +395,25 @@ const realApi = {
   trashThumbUrl: (t) => `/api/trash/${t.id}/thumb`,
   trashFileUrl: (t) => `/api/trash/${t.id}/file`,
 
+  search: (q) => request(`/api/search?${qs({ q })}`),
+  folderCreate: (section, name) => request('/api/folder', { method: 'POST', json: { section, name } }),
+  folderRename: (section, name, newName) => request('/api/folder/rename', { method: 'POST', json: { section, name, new_name: newName } }),
+  folderDelete: (section, name) => request(`/api/folder?${qs({ section, name })}`, { method: 'DELETE' }),
+  move: (section, item, folder) => request(`/api/file/move?${qs({ section, path: item.path })}`, { method: 'POST', json: { folder } }),
+  shares: () => request('/api/shares'),
+  shareCreate: (section, paths, days) => request('/api/shares', { method: 'POST', json: { section, paths, days } }),
+  shareRevoke: (token) => request(`/api/shares/${token}`, { method: 'DELETE' }),
+  previewUrl: (section, item) => `/api/preview?${qs({ section, path: item.path, v: `${item.date}-${item.size}` })}`,
+  putPreview: (section, item, blob) => request(`/api/preview?${qs({ section, path: item.path })}`,
+    { method: 'PUT', body: blob, headers: { 'Content-Type': 'image/jpeg' } }),
+
   // Upload in chunks: Cloudflare limits one request body to ~100 MB,
   // and chunks let a dropped connection resume instead of starting over.
-  async upload(file, onProgress) {
+  // `target`: { section, folder } to put it into an own folder instead of the date layout.
+  async upload(file, onProgress, target) {
     const { id } = await request('/api/upload/init', {
       method: 'POST',
-      json: { name: file.name, size: file.size, last_modified: file.lastModified || 0 },
+      json: { name: file.name, size: file.size, last_modified: file.lastModified || 0, ...(target || {}) },
     });
     let offset = 0, failures = 0;
     while (offset < file.size) {
@@ -469,7 +475,7 @@ function paintLandscape(seed, w, h) {
 }
 
 const mockApi = (() => {
-  const data = { photos: [], files: [], notes: [], trash: [] };
+  const data = { photos: [], files: [], notes: [], trash: [], folders: { photos: [], files: [] } };
   const urls = new Map();
   // ?mock=in skips the login screen (demo only, no real data involved).
   let authed = new URLSearchParams(location.search).get('mock') === 'in';
@@ -548,7 +554,7 @@ const mockApi = (() => {
     async list(section) {
       await delay(150);
       const items = data[section].slice();
-      return { items, total_size: items.reduce((s, x) => s + x.size, 0) };
+      return { items, folders: data.folders[section], total_size: items.reduce((s, x) => s + x.size, 0) };
     },
     async remove(section, item) {
       data[section] = data[section].filter((x) => x !== item);
@@ -629,6 +635,26 @@ const mockApi = (() => {
     },
 
     async zipStart() { throw new HttpError(0, 'В демо-режиме архивы не создаются'); },
+    async search(q) {
+      const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+      const has = (s) => words.every((w) => s.toLowerCase().includes(w));
+      return { hits: [
+        ...data.notes.filter((n) => has(n.content)).map((n) => ({ section: 'notes', path: n.id, snippet: n.content.slice(0, 100) })),
+        ...data.files.filter((f) => f.text && has(f.text)).map((f) => ({ section: 'files', path: f.path, snippet: f.text.slice(0, 100) })),
+      ] };
+    },
+    async folderCreate(section, name) { (data.folders[section] ||= []).push(name); return { name }; },
+    async folderRename() { throw new HttpError(0, 'В демо-режиме недоступно'); },
+    async folderDelete() { throw new HttpError(0, 'В демо-режиме недоступно'); },
+    async move(section, item, dest) {
+      item.path = dest ? `${dest}/${item.name}` : `${folder(item.date)}/${item.name}`;
+      return { path: item.path };
+    },
+    async shares() { return { items: [] }; },
+    async shareCreate() { throw new HttpError(0, 'В демо-режиме ссылки не создаются'); },
+    async shareRevoke() {},
+    previewUrl() { return ''; },
+    async putPreview() {},
 
     async trash() {
       await delay(120);
@@ -820,12 +846,13 @@ function searchWords() {
   return normalize($('#search').value).split(/\s+/).filter(Boolean);
 }
 
-function filterByQuery(items, textOf) {
+/** `hitOf(item)`: the server's snippet when the words were found inside the file/note. */
+function filterByQuery(items, textOf, hitOf) {
   const words = searchWords();
   if (!words.length) return items;
   return items.filter((item) => {
     const text = normalize(textOf(item));
-    return words.every((w) => text.includes(w));
+    return words.every((w) => text.includes(w)) || (hitOf && hitOf(item) !== undefined);
   });
 }
 
@@ -893,19 +920,24 @@ function reload(...sections) {
   return Promise.all(sections.map(load));
 }
 
-// Group items by their "YYYY/MM-Месяц" folder. Anything that doesn't sit in
-// such a folder (e.g. put there by hand) goes into a trailing "Другое" group.
+// Group items by their "YYYY/MM-Месяц" folder. Own folders come first, under their own
+// name; files lying loose in the section root go into a trailing "Другое" group.
 function groupByMonth(items) {
   const groups = new Map();
   for (const item of items) {
     const parts = item.path.split('/');
     const ok = parts.length >= 3 && /^\d{4}$/.test(parts[0]) && /^\d{2}-/.test(parts[1]);
-    const key = ok ? `${parts[0]}/${parts[1]}` : '~';
-    if (!groups.has(key)) groups.set(key, { year: ok ? parts[0] : null, month: ok ? parts[1].slice(3) : 'Другое', items: [] });
+    const own = !ok && parts.length >= 2 ? parts[0] : null;
+    const key = ok ? `${parts[0]}/${parts[1]}` : own ? `!${own}` : '~';
+    if (!groups.has(key)) {
+      const month = ok ? MONTHS[Number(parts[1].slice(0, 2)) - 1] || parts[1].slice(3) : own || t('Другое');
+      groups.set(key, { year: ok ? parts[0] : null, month, folder: own, items: [] });
+    }
     groups.get(key).items.push(item);
   }
+  const rank = (k) => (k[0] === '!' ? 0 : k === '~' ? 2 : 1);
   return [...groups.entries()]
-    .sort(([a], [b]) => (a === '~') - (b === '~') || b.localeCompare(a))
+    .sort(([a], [b]) => rank(a) - rank(b) || (rank(a) === 0 ? a.localeCompare(b) : b.localeCompare(a)))
     .map(([, g]) => { g.items.sort((a, b) => b.date - a.date); return g; });
 }
 
@@ -953,12 +985,14 @@ function render() {
   if (section === 'notes') return renderNotes(list);
   if (section === 'trash') return renderTrash(list);
   const { total_size, disk_free } = list;
-  const all = list.items;
-  const items = filterByQuery(all, (i) => i.name);
+  const folder = openFolder[section];
+  renderFolderBar(section, list.folders || []);
+  const all = folder ? list.items.filter((i) => folderOf(i) === folder) : list.items;
+  const items = filterByQuery(all, (i) => i.name, section === 'files' ? (i) => contentSnippet('files', i.path) : null);
   const content = $('#content');
 
   const n = all.length;
-  $('#search-box').hidden = !n;
+  $('#search-box').hidden = !list.items.length;
   const byAdded = sortOrder[section] === 'added';
   const action = $('#head-action');
   action.hidden = !n;
@@ -972,10 +1006,13 @@ function render() {
   $('#summary').classList.toggle('warn', disk_free != null && disk_free < 10 * 1024 ** 3);
 
   if (!n) {
+    state.flat = [];
     content.replaceChildren(el('div', { class: 'empty' },
       icon(section === 'photos' ? 'image' : 'cloud'),
-      el('div', { text: 'Здесь пока пусто' }),
-      el('div', { class: 'hint', text: 'Нажмите «+» или перетащите файлы в окно' })));
+      el('div', { text: folder ? t('Папка пуста') : t('Здесь пока пусто') }),
+      el('div', { class: 'hint', text: folder
+        ? t('Загрузите файлы сюда («+») или переложите: «⋯» у файла → «Переложить в папку»')
+        : t('Нажмите «+» или перетащите файлы в окно') })));
     return;
   }
   if (items.length !== n) $('#summary').textContent = `Найдено ${items.length} из ${n}`;
@@ -1011,12 +1048,16 @@ function renderGrid(items) {
   const grid = el('div', { class: 'grid' });
   for (const item of items) {
     const tile = el('button', { class: 'tile', title: item.name, onclick: () => onItemTap('photos', item) });
-    if (item.kind === 'image') {
+    if (item.kind === 'image' || (item.kind === 'raw' && !MOCK)) {
+      // HEIC has a thumbnail only once a browser made one (extras.js); otherwise try to make it.
       const src = api.thumbUrl('photos', item);
       const img = el('img', { src, alt: item.name, loading: 'lazy', decoding: 'async', draggable: 'false' });
       if (shownThumbs.has(src)) img.classList.add('loaded');
       img.onload = () => { shownThumbs.add(src); img.classList.add('loaded'); };
-      img.onerror = () => img.replaceWith(el('div', { class: 'placeholder' }, icon('image'), item.name.split('.').pop().toUpperCase()));
+      img.onerror = () => {
+        img.replaceWith(el('div', { class: 'placeholder' }, icon('image'), item.name.split('.').pop().toUpperCase()));
+        if (item.kind === 'raw') queuePreview(item, tile);
+      };
       tile.append(img);
     } else if (item.kind === 'video' && item.blob) {
       tile.append(el('video', { src: item.blob, muted: true, preload: 'metadata' }));
@@ -1041,6 +1082,7 @@ function renderFiles(items) {
       el('div', { class: 'file-icon', text: ext.slice(0, 4) || '—' }),
       el('div', { class: 'file-main' },
         el('div', { class: 'file-name', text: item.name }),
+        contentSnippet('files', item.path) !== undefined ? el('div', { class: 'file-snippet', text: contentSnippet('files', item.path) }) : null,
         // Two spans: one line on a phone, two columns on a wide screen.
         el('div', { class: 'file-meta' },
           el('span', { class: 'file-size', text: fmtSize(item.size) }),
@@ -1053,8 +1095,9 @@ function renderFiles(items) {
   return box;
 }
 
-/** Tap on a file: text opens in the editor, images in the photo editor, the rest downloads. */
+/** Tap on a file: Markdown, PDF and audio are shown, text opens in the editor, the rest downloads. */
 function openFile(section, item) {
+  if (viewFile(section, item)) return;
   if (isTextFile(item.name)) return openTextEditor(section, item);
   triggerDownload(api.fileUrl(section, item, true), item.name);
 }
@@ -1068,6 +1111,8 @@ function itemActions(section, item) {
     isTextFile(item.name) && { label: 'Редактировать', run: () => openTextEditor(section, item) },
     canEditPhoto && { label: 'Редактировать фото', run: () => openEditor(section, item) },
     { label: 'Переименовать', run: () => renameItem(section, item) },
+    { label: t('Переложить в папку'), run: () => moveToFolder(section, [item]) },
+    { label: t('Ссылка без пароля'), hint: t('на 1, 7 или 30 дней'), run: () => createShareLink(section, [item]) },
     ...conversionsFor(section, item),
     { label: 'Скачать', run: () => triggerDownload(api.fileUrl(section, item, true), item.name) },
     { label: 'Удалить', destructive: true, run: () => (section === 'photos' && viewer.open ? deleteFromViewer() : deleteItem(section, item)) },
@@ -1190,7 +1235,7 @@ function fillFrame(item) {
   video.pause();
   liftTile(item);
 
-  const full = api.fileUrl('photos', item, false);
+  const full = viewerUrl(item);   // HEIC: the JPEG a browser made, where this one can't show HEIC
   if (item.kind === 'video') {
     img.hidden = true;
     img.removeAttribute('src');
@@ -1216,6 +1261,9 @@ function fillFrame(item) {
   pre.onerror = () => {
     if (state.viewer[state.index] !== item) return;
     img.hidden = true;
+    fallback.textContent = item.kind === 'raw'
+      ? t('Этот браузер не показывает {ext}. Превью появится, когда галерею откроют на iPhone или в Safari.', { ext: splitName(item.name)[1].toUpperCase() })
+      : t('Этот формат браузер показать не может — скачайте файл.');
     fallback.hidden = false;
   };
   pre.src = full;
@@ -1403,6 +1451,9 @@ const UPLOADS_OUT = [{ opacity: 1, transform: 'none' }, { opacity: 0, transform:
 
 function enqueueUploads(files) {
   if (!files.length) return;
+  // Inside an own folder, uploads go into it.
+  const folder = (state.section === 'photos' || state.section === 'files') && openFolder[state.section];
+  const target = folder ? { section: state.section, folder } : null;
   clearTimeout(uploadsHideTimer);
   const panel = $('#uploads');
   if (panel.hidden) enter(panel, UPLOADS_IN, 'bouncy');
@@ -1414,7 +1465,7 @@ function enqueueUploads(files) {
       el('div', { class: 'up-bar' }, bar));
     $('#uploads-list').append(row);
     animate(row, [{ opacity: 0, transform: 'translateY(8px)' }, { opacity: 1, transform: 'none' }], 'smooth', { fill: 'none' });
-    uploadQueue.push({ file, bar, status });
+    uploadQueue.push({ file, bar, status, target });
   }
   uploadStats.total += files.length;
   updateUploadTitle();
@@ -1443,7 +1494,8 @@ async function runUploads() {
       const res = await api.upload(job.file, (p) => {
         job.bar.style.width = `${Math.round(p * 100)}%`;
         job.status.textContent = `${Math.round(p * 100)}%`;
-      });
+      }, job.target);
+      previewAfterUpload(job.file, res);
       job.status.textContent = res.section === 'photos' ? '→ Фото' : '→ Файлы';
       job.status.classList.add('ok');
       uploadStats.done++;

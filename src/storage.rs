@@ -270,9 +270,41 @@ pub fn rel_path(root: &Path, file: &Path) -> String {
         .join("/")
 }
 
-/// After deleting a file, remove month/year folders left empty (never the section itself).
+/// "2026" — a year folder of the automatic layout, not one the owner made.
+fn is_year(name: &str) -> bool {
+    name.len() == 4 && name.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The owner's own folders in a section: top-level folders other than the years.
+pub fn folders(root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.') && !is_year(n))
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names
+}
+
+/// A safe name for a new folder. Year names are refused: they belong to the date layout.
+pub fn folder_name(raw: &str) -> Option<String> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let name = sanitize_filename(raw);
+    (!is_year(&name)).then_some(name)
+}
+
+/// After deleting a file, remove month/year folders left empty (never the section itself,
+/// and never the owner's own folders: an empty one is still wanted).
 pub fn prune_empty_dirs(root: &Path, mut dir: &Path) {
     while dir != root && dir.starts_with(root) {
+        if dir.parent() == Some(root) && !dir.file_name().is_some_and(|n| is_year(&n.to_string_lossy())) {
+            break;
+        }
         if std::fs::remove_dir(dir).is_err() {
             break; // not empty
         }
@@ -394,6 +426,24 @@ mod tests {
         std::fs::write(dir.join("a.jpg"), "x").unwrap();
         assert_eq!(unique_path(&dir, "a.jpg"), dir.join("a (2).jpg"));
         assert_eq!(unique_path(&dir, "b.jpg"), dir.join("b.jpg"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn own_folders_survive_pruning() {
+        let dir = std::env::temp_dir().join(format!("lp-folders-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("2024/03-Март")).unwrap();
+        std::fs::create_dir_all(dir.join("Документы/сканы")).unwrap();
+        assert_eq!(folders(&dir), vec!["Документы".to_string()]);
+        assert_eq!(folder_name("2024"), None);
+        assert_eq!(folder_name("  "), None);
+        assert_eq!(folder_name("Работа/2024"), None);
+        assert_eq!(folder_name("Дача").as_deref(), Some("Дача"));
+        let root = dir.canonicalize().unwrap();
+        prune_empty_dirs(&root, &root.join("2024/03-Март"));
+        prune_empty_dirs(&root, &root.join("Документы/сканы"));
+        assert!(!root.join("2024").exists());
+        assert!(root.join("Документы").is_dir() && !root.join("Документы/сканы").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

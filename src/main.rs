@@ -13,7 +13,9 @@ mod notes;
 mod agent;
 mod agent_text;
 mod runner;
+mod search;
 mod service;
+mod shares;
 mod storage;
 mod telegram;
 mod terminal;
@@ -61,6 +63,9 @@ struct Args {
     backup_now: bool,
     /// `Some(true)` = named tunnel (asked interactively), `Some(false)` = back to quick.
     named_tunnel: Option<bool>,
+    /// `Some(true)` = new key for automatic uploads, `Some(false)` = turn them off.
+    upload_token: Option<bool>,
+    lang: Option<String>,
 }
 
 fn on_off(value: Option<String>, flag: &str) -> Result<bool> {
@@ -89,6 +94,9 @@ local-photo — домашнее облако для фото и файлов
   --backup-now        сделать резервную копию прямо сейчас
   --tunnel named      постоянный адрес: туннель Cloudflare со своим доменом (спросит токен)
   --tunnel quick      снова случайный адрес trycloudflare.com (без аккаунта)
+  --upload-token new  ключ для автозагрузки фото с iPhone («Быстрые команды»), см. README
+  --upload-token off  выключить автозагрузку
+  --lang ru|en        язык сообщений в Telegram и в консоли
   --setup            выбрать папку хранилища, задать логин, пароль и Telegram заново
   --port <порт>       локальный порт (по умолчанию 8787)
   --no-tunnel         не открывать доступ из интернета (только http://127.0.0.1)
@@ -100,6 +108,7 @@ fn parse_args() -> Result<Args> {
     let mut args = Args {
         dir: None, setup: false, no_tunnel: false, port: None, background: false, status: false, stop: false,
         autostart: None, terminal: None, runner: None, agent: None, two_factor: None, backup: None, backup_now: false, named_tunnel: None,
+        upload_token: None, lang: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -127,6 +136,20 @@ fn parse_args() -> Result<Args> {
                     Some("quick") => false,
                     _ => bail!("после --tunnel нужно named или quick"),
                 })
+            }
+            "--upload-token" => {
+                args.upload_token = Some(match it.next().as_deref() {
+                    Some("new") => true,
+                    Some("off") => false,
+                    _ => bail!("после --upload-token нужно new или off"),
+                })
+            }
+            "--lang" => {
+                let v = it.next().unwrap_or_default();
+                if v != "ru" && v != "en" {
+                    bail!("после --lang нужно ru или en");
+                }
+                args.lang = Some(v);
             }
             "-h" | "--help" => {
                 print!("{HELP}");
@@ -210,6 +233,8 @@ async fn print_status(config_dir: &Path) -> Result<()> {
             }
         }
     }
+    let auto = config.as_ref().is_some_and(|c| c.upload_token.is_some());
+    println!("  Автозагрузка: {}", if auto { "по ключу (--upload-token off — выключить)" } else { "выключена (--upload-token new — для iPhone)" });
     println!("  Журнал:      {}", config_dir.join("local-photo.log").display());
     service::pause_if_own_window();
     Ok(())
@@ -376,6 +401,43 @@ async fn run() -> Result<()> {
         } else {
             println!("Claude в Telegram выключен. Если он сейчас работает — остановится в течение нескольких секунд.");
         }
+        return Ok(());
+    }
+    if args.upload_token.is_some() || args.lang.is_some() {
+        let mut config = Config::load(&config_file)?.context("сначала настройте облако: запустите программу без параметров")?;
+        if let Some(lang) = &args.lang {
+            config.lang = (lang != "ru").then(|| lang.clone());
+            println!("{}", if lang == "en" { "Telegram messages and the console are now in English." } else { "Сообщения в Telegram и в консоли — по-русски." });
+        }
+        match args.upload_token {
+            Some(true) => {
+                let token = auth::random_hex(20);
+                config.upload_token = Some(web::upload_token_hash(&token));
+                let url = service::running(&config_dir).await.and_then(|st| st.url)
+                    .or_else(|| config.named_tunnel.as_ref().map(|t| t.url.clone()))
+                    .unwrap_or_else(|| "https://<адрес облака>".into());
+                println!("Ключ автозагрузки (показывается один раз, старый ключ больше не действует):");
+                println!();
+                println!("   {token}");
+                println!();
+                println!("В «Быстрой команде» на iPhone:");
+                println!("   URL:       {url}/api/auto-upload?name=<имя файла>");
+                println!("   Метод:     POST, тело запроса — Файл");
+                println!("   Заголовок: Authorization = Bearer {token}");
+                println!("Пошагово — в README, раздел «Автозагрузка с iPhone».");
+                if config.named_tunnel.is_none() {
+                    println!("Внимание: адрес trycloudflare меняется при каждом перезапуске облака — его придётся");
+                    println!("исправлять в команде. Постоянный адрес: local-photo --tunnel named");
+                }
+            }
+            Some(false) => {
+                config.upload_token = None;
+                println!("Автозагрузка выключена: ключ больше не действует.");
+            }
+            None => {}
+        }
+        config.save(&config_file)?;
+        service::pause_if_own_window();
         return Ok(());
     }
     if args.two_factor.is_some() || args.backup.is_some() || args.backup_now || args.named_tunnel.is_some() {

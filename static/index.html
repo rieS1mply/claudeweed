@@ -33,6 +33,7 @@
     </div>
     <div class="login-error" id="login-error" hidden></div>
     <button type="submit" class="btn primary wide" id="login-submit">Войти</button>
+    <button type="button" class="btn link login-lang" id="login-lang"></button>
   </form>
 </div>
 
@@ -56,6 +57,12 @@
       <a class="btn glass round" id="term-btn" href="terminal.html" title="Терминал" hidden>
         <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3M13 15h4"/></svg>
       </a>
+      <button class="btn glass round" id="links-btn" type="button" title="Ссылки без пароля">
+        <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>
+      </button>
+      <button class="btn glass round" id="lang-btn" type="button" title="Язык">
+        <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+      </button>
       <button class="btn glass round" id="trash-btn" type="button" title="Корзина">
         <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>
       </button>
@@ -76,9 +83,10 @@
     <div class="summary" id="summary"></div>
     <label class="search" id="search-box">
       <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></svg>
-      <input id="search" type="search" placeholder="Поиск" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Поиск по имени">
+      <input id="search" type="search" placeholder="Поиск" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Поиск">
       <kbd class="search-key" aria-hidden="true">/</kbd>
     </label>
+    <div class="folders" id="folders" hidden></div>
   </div>
   <main id="content" class="content"></main>
 
@@ -113,6 +121,14 @@
     <button class="sel-btn" id="sel-download">
       <svg viewBox="0 0 24 24" class="icon"><path d="M12 4v12m0 0-5-5m5 5 5-5M4 20h16"/></svg>
       <span>Скачать</span>
+    </button>
+    <button class="sel-btn" id="sel-move">
+      <svg viewBox="0 0 24 24" class="icon"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10v6M9 13l3 3 3-3"/></svg>
+      <span>В папку</span>
+    </button>
+    <button class="sel-btn" id="sel-link">
+      <svg viewBox="0 0 24 24" class="icon"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>
+      <span>Ссылка</span>
     </button>
     <button class="sel-btn danger" id="sel-delete">
       <svg viewBox="0 0 24 24" class="icon"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>
@@ -315,15 +331,46 @@
   <div class="sym-bar" id="sym-bar" hidden></div>
 </div>
 
+<!-- Audio player: stays at the bottom while browsing. -->
+<div id="player" class="player glass" hidden>
+  <div class="player-head">
+    <div class="player-info">
+      <div class="player-title" id="player-title"></div>
+      <div class="player-meta" id="player-meta"></div>
+    </div>
+    <button class="btn round small" id="player-download" title="Скачать">
+      <svg viewBox="0 0 24 24" class="icon"><path d="M12 4v12m0 0-5-5m5 5 5-5M4 20h16"/></svg>
+    </button>
+    <button class="btn round small" id="player-close" title="Закрыть">
+      <svg viewBox="0 0 24 24" class="icon"><path d="M6 6l12 12M18 6 6 18"/></svg>
+    </button>
+  </div>
+  <audio id="player-audio" controls preload="metadata"></audio>
+</div>
+
+<!-- Markdown, rendered. "Править" opens it in the text editor. -->
+<div id="md" class="doc md" hidden>
+  <div class="doc-bar">
+    <button class="doc-btn" id="md-close">Закрыть</button>
+    <div class="doc-mid"><div class="doc-title" id="md-title"></div></div>
+    <div class="doc-right" id="md-right"></div>
+  </div>
+  <article class="md-view" id="md-view"></article>
+</div>
+
 <div id="drop" class="drop" hidden><div class="drop-card glass">Отпустите, чтобы загрузить</div></div>
 <div id="toast" class="toast glass" hidden></div>
 
+<script src="i18n.js"></script>
+<script src="lang-en.js"></script>
 <script src="app.js"></script>
 <script src="editor.js"></script>
 <script src="runner.js"></script>
 <script src="notes.js"></script>
 <script src="trash.js"></script>
 <script src="select.js"></script>
+<script src="markdown.js"></script>
+<script src="extras.js"></script>
 <script src="start.js"></script>
 </body>
 </html>

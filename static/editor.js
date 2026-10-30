@@ -51,7 +51,7 @@ function fitPixels(w, h) {
 async function openEditor(section, item) {
   let img;
   try {
-    img = await loadImage(api.fileUrl(section, item, false));
+    img = await loadImage(section === 'photos' ? viewerUrl(item) : api.fileUrl(section, item, false));
   } catch (e) {
     return toast(`${e.message} (${splitName(item.name)[1].toUpperCase()})`);
   }
@@ -415,7 +415,7 @@ function conversionsFor(section, item) {
 async function convertImage(section, item, target) {
   toast(`Конвертирую в ${target.label}…`);
   try {
-    const img = await loadImage(api.fileUrl(section, item, false));
+    const img = await loadImage(section === 'photos' ? viewerUrl(item) : api.fileUrl(section, item, false));
     const [w, h] = fitPixels(img.naturalWidth, img.naturalHeight);
     const canvas = document.createElement('canvas');
     canvas.width = w;

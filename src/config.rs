@@ -140,6 +140,12 @@ pub struct Config {
     /// A named Cloudflare tunnel with a permanent address instead of a random trycloudflare one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub named_tunnel: Option<NamedTunnel>,
+    /// SHA-256 of the key for automatic uploads (`--upload-token new`, iPhone Shortcuts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_token: Option<String>,
+    /// Language of Telegram messages and the console: "ru" (default) or "en" (`--lang`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -431,6 +437,8 @@ pub async fn setup(path: &Path, previous: Option<&Config>, suggestion: Option<&P
         totp_secret: previous.and_then(|c| c.totp_secret.clone()),
         backup_dir: previous.and_then(|c| c.backup_dir.clone()),
         named_tunnel: previous.and_then(|c| c.named_tunnel.clone()),
+        upload_token: previous.and_then(|c| c.upload_token.clone()),
+        lang: previous.and_then(|c| c.lang.clone()),
     };
     config.save(path)?;
     println!();
@@ -501,7 +509,7 @@ mod tests {
         let old_system = base.join(SYSTEM_DIR);
         std::fs::create_dir_all(old_system.join("trash/abc")).unwrap();
         std::fs::create_dir_all(base.join(LEGACY_STORAGE_DIR).join("Фото")).unwrap();
-        let cfg = Config { storage_dir: None, username: "u".into(), password_hash: "h".into(), port: 1, telegram: None, terminal: false, runner: false, agent: false, totp_secret: None, backup_dir: None, named_tunnel: None };
+        let cfg = Config { storage_dir: None, username: "u".into(), password_hash: "h".into(), port: 1, telegram: None, terminal: false, runner: false, agent: false, totp_secret: None, backup_dir: None, named_tunnel: None, upload_token: None, lang: None };
         cfg.save(&old_system.join(CONFIG_FILE)).unwrap();
         let config_dir = base.join("settings");
 

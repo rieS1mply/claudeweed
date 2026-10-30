@@ -24,7 +24,7 @@ use tower_http::services::ServeFile;
 use crate::auth::{self, Auth};
 use crate::config::{Config, Paths};
 use crate::storage::{self, Kind, Section};
-use crate::{notes, runner, telegram, terminal, thumbs, totp, trash, zips};
+use crate::{notes, runner, search, shares, telegram, terminal, thumbs, totp, trash, zips};
 
 /// Matches CHUNK_SIZE in app.js, with headroom.
 const MAX_CHUNK: usize = 20 * 1024 * 1024;
@@ -52,12 +52,15 @@ pub struct AppState {
     pub runner: Arc<runner::Runner>,
     /// Last authenticator step accepted at login: the same code can't log in twice.
     totp_last_step: std::sync::Mutex<u64>,
+    shares: shares::Shares,
 }
 
 struct Upload {
     name: String,
     size: u64,
     last_modified: i64,
+    /// The owner's folder the file goes into, instead of the date layout.
+    folder: Option<(Section, String)>,
     received: u64,
     tmp: PathBuf,
     file: Option<tokio::fs::File>,
@@ -68,7 +71,9 @@ pub type App = Arc<AppState>;
 
 impl AppState {
     pub fn new(paths: Paths, config: Config, auth: Auth, local_secret: String, stop: Arc<tokio::sync::Notify>) -> App {
+        let shares_file = paths.config.with_file_name("shares.json");
         Arc::new(AppState {
+            shares: shares::Shares::load(&shares_file),
             paths,
             config,
             auth,
@@ -100,6 +105,11 @@ impl AppState {
     /// Also read live: `--2fa on` takes effect for the next login without a restart.
     fn totp_secret(&self) -> Option<String> {
         Config::load(&self.paths.config).ok().flatten().map_or_else(|| self.config.totp_secret.clone(), |c| c.totp_secret)
+    }
+
+    /// SHA-256 of the auto-upload key (`--upload-token new`), read live like the other switches.
+    fn upload_token_hash(&self) -> Option<String> {
+        Config::load(&self.paths.config).ok().flatten().map_or_else(|| self.config.upload_token.clone(), |c| c.upload_token)
     }
 
     /// Folder of a section by its API name, including "notes".
@@ -142,12 +152,26 @@ pub fn router(app: App) -> Router {
         .route("/api/terminal/sessions/{id}", put(terminal_rename).delete(terminal_close))
         .route("/api/run/langs", get(run_langs))
         .route("/api/run", post(run_code).layer(DefaultBodyLimit::max(runner::MAX_SOURCE + runner::MAX_STDIN + 4096)))
+        .route("/api/search", get(search_content))
+        .route("/api/folder", post(folder_create).delete(folder_delete))
+        .route("/api/folder/rename", post(folder_rename))
+        .route("/api/file/move", post(move_file))
+        .route("/api/shares", get(shares_list).post(share_create))
+        .route("/api/shares/{token}", axum::routing::delete(share_revoke))
+        .route("/api/preview", get(preview_get).put(preview_put).layer(DefaultBodyLimit::max(MAX_PREVIEW)))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_session));
 
     Router::new()
         .route("/api/session", get(session))
         .route("/api/login", post(login))
         .route("/api/local/stop", post(local_stop))
+        // Open without the password: the long random link (or upload key) is the permission.
+        .route("/s/{token}", get(share_page))
+        .route("/api/s/{token}", get(share_info))
+        .route("/api/s/{token}/file/{index}", get(share_file))
+        .route("/api/s/{token}/thumb/{index}", get(share_thumb))
+        .route("/api/s/{token}/preview/{index}", get(share_preview))
+        .route("/api/auto-upload", post(auto_upload))
         .merge(protected)
         .route("/", get(index))
         .route("/terminal.html", get(terminal_page))
@@ -298,6 +322,9 @@ struct FileQuery {
     path: String,
     #[serde(default)]
     download: Option<String>,
+    /// Open a PDF in the browser's viewer instead of downloading it.
+    #[serde(default)]
+    view: Option<String>,
 }
 
 impl FileQuery {
@@ -691,10 +718,10 @@ async fn list(State(app): State<App>, Query(q): Query<ListQuery>) -> Response {
         return error(StatusCode::BAD_REQUEST, "Неизвестный раздел");
     };
     let root = app.section_root(section);
-    let items = tokio::task::spawn_blocking(move || storage::list(&root)).await.unwrap_or_default();
+    let (items, folders) = tokio::task::spawn_blocking(move || (storage::list(&root), storage::folders(&root))).await.unwrap_or_default();
     let total: u64 = items.iter().map(|i| i.size).sum();
     let free = fs4::available_space(&app.paths.storage).ok();
-    Json(json!({ "items": items, "total_size": total, "disk_free": free })).into_response()
+    Json(json!({ "items": items, "folders": folders, "total_size": total, "disk_free": free })).into_response()
 }
 
 /// Streams a stored file. Range requests work (video seeking, Safari playback needs them).
@@ -715,8 +742,28 @@ async fn serve_stored(path: &std::path::Path, inline: bool, req: Request) -> Res
 
 async fn get_file(State(app): State<App>, Query(q): Query<FileQuery>, req: Request) -> Response {
     let Some((section, path)) = q.locate(&app) else { return not_found() };
+    if q.view.is_some() && is_pdf(&q.path) {
+        return serve_pdf(&path, req).await;
+    }
     let inline = section == Section::Photos && Kind::of(&q.path) != Kind::File && q.download.is_none();
     serve_stored(&path, inline, req).await
+}
+
+fn is_pdf(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(_, e)| e.eq_ignore_ascii_case("pdf"))
+}
+
+/// A PDF shown in the browser's own viewer. Browsers refuse to show PDFs in a sandboxed
+/// document, so instead of `sandbox` the type is pinned: with `nosniff` and
+/// `application/pdf` it can only ever open as a PDF, never as a page of this site.
+async fn serve_pdf(path: &std::path::Path, req: Request) -> Response {
+    let mut res = serve_stored(path, true, req).await;
+    if res.status().is_success() || res.status() == StatusCode::PARTIAL_CONTENT {
+        let h = res.headers_mut();
+        h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/pdf"));
+        h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'none'; object-src 'self'; frame-ancestors 'none'"));
+    }
+    res
 }
 
 /// JPEG preview of `path`, cached under `cache_key` (changes with size and mtime).
@@ -749,10 +796,21 @@ async fn thumb_response(app: &AppState, cache_ns: &str, cache_key: &str, path: P
 
 async fn thumb(State(app): State<App>, Query(q): Query<FileQuery>) -> Response {
     let Some((section, path)) = q.locate(&app) else { return not_found() };
-    if Kind::of(&q.path) != Kind::Image {
-        return not_found();
+    match Kind::of(&q.path) {
+        Kind::Image => thumb_response(&app, section.id(), &q.path, path).await,
+        // HEIC & co: only a thumbnail a browser made earlier (PUT /api/preview).
+        Kind::Raw => cached_jpeg(&app, section.id(), &q.path, &path).await,
+        _ => not_found(),
     }
-    thumb_response(&app, section.id(), &q.path, path).await
+}
+
+/// A JPEG from the thumbnail cache, if it is there; never generated here.
+async fn cached_jpeg(app: &AppState, cache_ns: &str, cache_key: &str, path: &std::path::Path) -> Response {
+    let Ok(meta) = tokio::fs::metadata(path).await else { return not_found() };
+    match tokio::fs::read(thumbs::cache_path(&app.paths.thumbs, cache_ns, cache_key, &meta)).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "private, max-age=604800")], bytes).into_response(),
+        Err(_) => not_found(),
+    }
 }
 
 /// Deleting never destroys anything right away: the file goes to the trash for 30 days.
@@ -1090,6 +1148,11 @@ struct InitBody {
     size: u64,
     #[serde(default)]
     last_modified: i64,
+    /// Upload into the owner's folder `folder` of `section` instead of the date layout.
+    #[serde(default)]
+    section: Option<String>,
+    #[serde(default)]
+    folder: Option<String>,
 }
 
 /// Kept free on the storage disk, so an upload never fills it up completely.
@@ -1105,6 +1168,13 @@ async fn upload_init(State(app): State<App>, Json(body): Json<InitBody>) -> Resp
             );
         }
     }
+    let folder = match (body.section.as_deref().and_then(Section::parse), body.folder.as_deref().filter(|f| !f.is_empty())) {
+        (Some(section), Some(f)) => match own_folder(&app, section, f) {
+            Some(name) => Some((section, name)),
+            None => return error(StatusCode::NOT_FOUND, "Папка не найдена"),
+        },
+        _ => None,
+    };
     let id = auth::random_hex(16);
     let tmp = app.paths.uploads.join(format!("{id}.part"));
     let file = match tokio::fs::File::create(&tmp).await {
@@ -1115,6 +1185,7 @@ async fn upload_init(State(app): State<App>, Json(body): Json<InitBody>) -> Resp
         name: body.name,
         size: body.size,
         last_modified: body.last_modified,
+        folder,
         received: 0,
         tmp,
         file: Some(file),
@@ -1178,10 +1249,14 @@ async fn upload_finish(State(app): State<App>, UrlPath(id): UrlPath<String>) -> 
     app.uploads.lock().unwrap().remove(&id);
 
     let name = storage::sanitize_filename(&u.name);
-    let (tmp, last_modified) = (u.tmp.clone(), u.last_modified);
+    let (tmp, last_modified, folder) = (u.tmp.clone(), u.last_modified, u.folder.clone());
     let _guard = app.place_lock.lock().await;
     let storage_root = app.paths.storage.clone();
-    let placed = tokio::task::spawn_blocking(move || place_file(&storage_root, &tmp, &name, last_modified)).await;
+    let placed = tokio::task::spawn_blocking(move || match folder {
+        Some((section, folder)) => place_in_folder(&storage_root, section, &folder, &tmp, &name, last_modified),
+        None => place_file(&storage_root, &tmp, &name, last_modified),
+    })
+    .await;
     match placed {
         Ok(Ok((section, rel))) => {
             crate::log!("Загружен {}/{rel}", section.dir_name());
@@ -1211,17 +1286,37 @@ pub async fn store_file(app: &AppState, tmp: PathBuf, name: &str, client_mtime_m
 /// Picks the section and YYYY/MM folder from the file's own date, moves it there,
 /// and stamps that date as the file's modification time.
 fn place_file(storage_root: &std::path::Path, tmp: &std::path::Path, name: &str, client_mtime_ms: i64) -> anyhow::Result<(Section, String)> {
+    let (section, folder, date) = date_place(tmp, name, client_mtime_ms);
+    move_into(storage_root, section, &folder, tmp, name, date)
+}
+
+/// Same, into one of the owner's folders (the file still keeps its own date).
+fn place_in_folder(storage_root: &std::path::Path, section: Section, folder: &str, tmp: &std::path::Path, name: &str, client_mtime_ms: i64) -> anyhow::Result<(Section, String)> {
+    let (_, _, date) = date_place(tmp, name, client_mtime_ms);
+    move_into(storage_root, section, folder, tmp, name, date)
+}
+
+/// Where a new file belongs: its section, "YYYY/MM-Месяц" and the date it was taken/created.
+fn date_place(tmp: &std::path::Path, name: &str, client_mtime_ms: i64) -> (Section, String, chrono::DateTime<chrono::Local>) {
     use chrono::{Local, TimeZone};
 
     let kind = Kind::of(name);
-    let section = kind.section();
     let date = storage::capture_date(tmp, kind)
         .or_else(|| (client_mtime_ms > 0).then(|| Local.timestamp_millis_opt(client_mtime_ms).single()).flatten())
         .unwrap_or_else(Local::now);
+    (kind.section(), storage::month_folder(&date), date)
+}
 
-    let folder = storage::month_folder(&date);
-    let section_root = storage_root.join(section.dir_name());
-    let dir = folder.split('/').fold(section_root, |p, part| p.join(part));
+/// Moves the temp file to `section/folder/name` (a free variant of the name), dated `date`.
+fn move_into(
+    storage_root: &std::path::Path,
+    section: Section,
+    folder: &str,
+    tmp: &std::path::Path,
+    name: &str,
+    date: chrono::DateTime<chrono::Local>,
+) -> anyhow::Result<(Section, String)> {
+    let dir = folder.split('/').fold(storage_root.join(section.dir_name()), |p, part| p.join(part));
     std::fs::create_dir_all(&dir)?;
     let dest = storage::unique_path(&dir, name);
     if std::fs::rename(tmp, &dest).is_err() {
@@ -1234,4 +1329,386 @@ fn place_file(storage_root: &std::path::Path, tmp: &std::path::Path, name: &str,
 
     let file_name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     Ok((section, format!("{folder}/{file_name}")))
+}
+
+// ---------- search inside notes and text files ----------
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+}
+
+async fn search_content(State(app): State<App>, Query(q): Query<SearchQuery>) -> Response {
+    let query: String = q.q.chars().take(200).collect();
+    if query.trim().chars().count() < 2 {
+        return Json(json!({ "hits": [] })).into_response();
+    }
+    let (notes_dir, files_root) = (app.paths.notes.clone(), app.section_root(Section::Files));
+    let hits = tokio::task::spawn_blocking(move || search::search(&notes_dir, &files_root, &query)).await.unwrap_or_default();
+    Json(json!({ "hits": hits })).into_response()
+}
+
+// ---------- the owner's own folders ----------
+
+/// Name of an existing own folder of `section`, from what the client sent.
+fn own_folder(app: &AppState, section: Section, raw: &str) -> Option<String> {
+    storage::folder_name(raw).filter(|name| app.section_root(section).join(name).is_dir())
+}
+
+#[derive(Deserialize)]
+struct FolderBody {
+    section: String,
+    name: String,
+    /// For a rename: the new name.
+    #[serde(default)]
+    new_name: Option<String>,
+}
+
+async fn folder_create(State(app): State<App>, Json(body): Json<FolderBody>) -> Response {
+    let Some(section) = Section::parse(&body.section) else { return error(StatusCode::BAD_REQUEST, "Неизвестный раздел") };
+    let Some(name) = storage::folder_name(&body.name) else {
+        return error(StatusCode::BAD_REQUEST, "Такое имя папки нельзя: оно пустое или похоже на год");
+    };
+    let dir = app.section_root(section).join(&name);
+    let _guard = app.place_lock.lock().await;
+    if dir.exists() {
+        return error(StatusCode::CONFLICT, "Папка с таким именем уже есть");
+    }
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Не удалось создать папку: {e}"));
+    }
+    crate::log!("Создана папка {}/{name}", section.dir_name());
+    Json(json!({ "name": name })).into_response()
+}
+
+async fn folder_rename(State(app): State<App>, Json(body): Json<FolderBody>) -> Response {
+    let Some(section) = Section::parse(&body.section) else { return error(StatusCode::BAD_REQUEST, "Неизвестный раздел") };
+    let Some(old) = own_folder(&app, section, &body.name) else { return error(StatusCode::NOT_FOUND, "Папка не найдена") };
+    let Some(new) = body.new_name.as_deref().and_then(storage::folder_name) else {
+        return error(StatusCode::BAD_REQUEST, "Такое имя папки нельзя: оно пустое или похоже на год");
+    };
+    let root = app.section_root(section);
+    let _guard = app.place_lock.lock().await;
+    if new != old && root.join(&new).exists() {
+        return error(StatusCode::CONFLICT, "Папка с таким именем уже есть");
+    }
+    if let Err(e) = std::fs::rename(root.join(&old), root.join(&new)) {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Не удалось переименовать: {e}"));
+    }
+    crate::log!("Папка {}/{old} → {new}", section.dir_name());
+    Json(json!({ "name": new })).into_response()
+}
+
+#[derive(Deserialize)]
+struct FolderQuery {
+    section: String,
+    name: String,
+}
+
+/// Only an empty folder: files are never deleted in bulk by removing their folder.
+async fn folder_delete(State(app): State<App>, Query(q): Query<FolderQuery>) -> Response {
+    let Some(section) = Section::parse(&q.section) else { return error(StatusCode::BAD_REQUEST, "Неизвестный раздел") };
+    let Some(name) = own_folder(&app, section, &q.name) else { return error(StatusCode::NOT_FOUND, "Папка не найдена") };
+    let dir = app.section_root(section).join(&name);
+    let _guard = app.place_lock.lock().await;
+    if !storage::list(&dir).is_empty() {
+        return error(StatusCode::CONFLICT, "В папке есть файлы: сначала переложите или удалите их");
+    }
+    // Only hidden leftovers (desktop.ini, empty subfolders) may remain: they go with it.
+    if let Err(e) = std::fs::remove_dir_all(&dir) {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Не удалось удалить папку: {e}"));
+    }
+    crate::log!("Удалена пустая папка {}/{name}", section.dir_name());
+    Json(json!({ "ok": true })).into_response()
+}
+
+#[derive(Deserialize)]
+struct MoveBody {
+    /// An own folder, or empty to put the file back into the date layout.
+    #[serde(default)]
+    folder: String,
+}
+
+async fn move_file(State(app): State<App>, Query(q): Query<FileQuery>, Json(body): Json<MoveBody>) -> Response {
+    let Some((section, path)) = q.locate(&app) else { return not_found() };
+    let root = app.section_root(section);
+    let target = if body.folder.is_empty() {
+        use chrono::TimeZone;
+        let Ok(meta) = std::fs::metadata(&path) else { return not_found() };
+        let date = chrono::Local.timestamp_millis_opt(storage::mtime_ms(&meta)).single().unwrap_or_else(chrono::Local::now);
+        storage::month_folder(&date)
+    } else {
+        match own_folder(&app, section, &body.folder) {
+            Some(f) => f,
+            None => return error(StatusCode::NOT_FOUND, "Папка не найдена"),
+        }
+    };
+    let dir = target.split('/').fold(root.clone(), |p, part| p.join(part));
+    let _guard = app.place_lock.lock().await;
+    if path.parent().and_then(|p| p.canonicalize().ok()) == dir.canonicalize().ok() {
+        return Json(json!({ "path": q.path })).into_response();
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let moved = std::fs::create_dir_all(&dir).and_then(|_| {
+        let dest = storage::unique_path(&dir, &name);
+        std::fs::rename(&path, &dest).map(|_| dest)
+    });
+    let dest = match moved {
+        Ok(d) => d,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Не удалось переложить: {e}")),
+    };
+    if let (Some(parent), Ok(root)) = (path.parent(), root.canonicalize()) {
+        storage::prune_empty_dirs(&root, parent);
+    }
+    let rel = storage::rel_path(&root, &dest);
+    crate::log!("Переложен {}/{} → {rel}", section.dir_name(), q.path);
+    Json(json!({ "path": rel })).into_response()
+}
+
+// ---------- share links ----------
+
+#[derive(Deserialize)]
+struct ShareBody {
+    section: String,
+    paths: Vec<String>,
+    days: i64,
+}
+
+async fn share_create(State(app): State<App>, Json(body): Json<ShareBody>) -> Response {
+    let Some(section) = Section::parse(&body.section) else { return error(StatusCode::BAD_REQUEST, "Неизвестный раздел") };
+    if body.paths.is_empty() || body.paths.len() > shares::MAX_FILES {
+        return error(StatusCode::BAD_REQUEST, "Выберите от 1 до 500 файлов");
+    }
+    let root = app.section_root(section);
+    if body.paths.iter().any(|p| storage::resolve(&root, p).is_none()) {
+        return error(StatusCode::NOT_FOUND, "Некоторые файлы не найдены — обновите страницу");
+    }
+    let name = match body.paths.as_slice() {
+        [one] => one.rsplit('/').next().unwrap_or(one).to_string(),
+        many => {
+            let n = many.len();
+            let word = match (n % 10, n % 100) {
+                (1, m) if m != 11 => "файл",
+                (2..=4, m) if !(12..=14).contains(&m) => "файла",
+                _ => "файлов",
+            };
+            format!("{n} {word}")
+        }
+    };
+    let share = app.shares.create(section.id(), body.paths, name, body.days);
+    crate::log!("Создана ссылка на «{}» ({} дн.)", share.name, body.days.clamp(1, shares::MAX_DAYS));
+    Json(share).into_response()
+}
+
+async fn shares_list(State(app): State<App>) -> Response {
+    Json(json!({ "items": app.shares.list() })).into_response()
+}
+
+async fn share_revoke(State(app): State<App>, UrlPath(token): UrlPath<String>) -> Response {
+    if !app.shares.revoke(&token) {
+        return error(StatusCode::NOT_FOUND, "Ссылка не найдена");
+    }
+    crate::log!("Ссылка отозвана");
+    Json(json!({ "ok": true })).into_response()
+}
+
+async fn share_page(headers: HeaderMap) -> Response {
+    asset_response("share.html", &headers)
+}
+
+fn share_gone() -> Response {
+    error(StatusCode::NOT_FOUND, "Ссылка не действует: срок истёк или её отозвали")
+}
+
+async fn share_info(State(app): State<App>, UrlPath(token): UrlPath<String>) -> Response {
+    let Some(share) = app.shares.get(&token) else { return share_gone() };
+    let Some(section) = Section::parse(&share.section) else { return share_gone() };
+    let root = app.section_root(section);
+    let items: Vec<_> = share
+        .paths
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            let file = storage::resolve(&root, p)?;
+            let meta = std::fs::metadata(&file).ok()?;
+            let name = p.rsplit('/').next().unwrap_or(p);
+            Some(json!({ "index": i, "name": name, "size": meta.len(), "date": storage::mtime_ms(&meta), "kind": Kind::of(name) }))
+        })
+        .collect();
+    Json(json!({ "name": share.name, "section": share.section, "expires": share.expires, "items": items })).into_response()
+}
+
+/// The `index`-th file of a valid link, if it still exists where it was.
+fn shared_file(app: &AppState, token: &str, index: usize) -> Option<(Section, String, PathBuf)> {
+    let share = app.shares.get(token)?;
+    let section = Section::parse(&share.section)?;
+    let rel = share.paths.get(index)?.clone();
+    let path = storage::resolve(&app.section_root(section), &rel)?;
+    Some((section, rel, path))
+}
+
+#[derive(Deserialize)]
+struct ShareFileQuery {
+    #[serde(default)]
+    download: Option<String>,
+    #[serde(default)]
+    view: Option<String>,
+}
+
+async fn share_file(
+    State(app): State<App>,
+    UrlPath((token, index)): UrlPath<(String, usize)>,
+    Query(q): Query<ShareFileQuery>,
+    req: Request,
+) -> Response {
+    let Some((section, rel, path)) = shared_file(&app, &token, index) else { return share_gone() };
+    if q.view.is_some() && is_pdf(&rel) {
+        return serve_pdf(&path, req).await;
+    }
+    let inline = section == Section::Photos && matches!(Kind::of(&rel), Kind::Image | Kind::Video) && q.download.is_none();
+    serve_stored(&path, inline, req).await
+}
+
+async fn share_thumb(State(app): State<App>, UrlPath((token, index)): UrlPath<(String, usize)>) -> Response {
+    let Some((section, rel, path)) = shared_file(&app, &token, index) else { return share_gone() };
+    match Kind::of(&rel) {
+        Kind::Image => thumb_response(&app, section.id(), &rel, path).await,
+        Kind::Raw => cached_jpeg(&app, section.id(), &rel, &path).await,
+        _ => not_found(),
+    }
+}
+
+async fn share_preview(State(app): State<App>, UrlPath((token, index)): UrlPath<(String, usize)>) -> Response {
+    let Some((_, rel, path)) = shared_file(&app, &token, index) else { return share_gone() };
+    cached_jpeg(&app, "preview", &rel, &path).await
+}
+
+// ---------- previews of photos this program can't decode (HEIC) ----------
+
+/// A 4096-px JPEG from the browser stays well under this.
+const MAX_PREVIEW: usize = 12 * 1024 * 1024;
+
+async fn preview_get(State(app): State<App>, Query(q): Query<FileQuery>) -> Response {
+    let Some((_, path)) = q.locate(&app) else { return not_found() };
+    if Kind::of(&q.path) != Kind::Raw {
+        return not_found();
+    }
+    cached_jpeg(&app, "preview", &q.path, &path).await
+}
+
+/// Safari decodes HEIC, this program can't: the page sends a JPEG it made, and every
+/// other browser then gets a thumbnail and a viewable photo too.
+async fn preview_put(State(app): State<App>, Query(q): Query<FileQuery>, body: Bytes) -> Response {
+    let Some((section, path)) = q.locate(&app) else { return not_found() };
+    if Kind::of(&q.path) != Kind::Raw {
+        return error(StatusCode::BAD_REQUEST, "Превью нужно только для HEIC и похожих форматов");
+    }
+    let Ok(meta) = std::fs::metadata(&path) else { return not_found() };
+    let preview = thumbs::cache_path(&app.paths.thumbs, "preview", &q.path, &meta);
+    let thumb = thumbs::cache_path(&app.paths.thumbs, section.id(), &q.path, &meta);
+    let _slot = app.thumb_slots.acquire().await;
+    match tokio::task::spawn_blocking(move || thumbs::store_preview(&body, &preview, &thumb)).await {
+        Ok(Ok(())) => Json(json!({ "ok": true })).into_response(),
+        Ok(Err(e)) => error(StatusCode::BAD_REQUEST, &format!("Превью не принято: {e:#}")),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Превью не принято"),
+    }
+}
+
+// ---------- automatic upload (iPhone Shortcuts) ----------
+
+/// Cloudflare refuses bodies over ~100 MB, so nothing bigger arrives through the tunnel anyway.
+const MAX_AUTO_UPLOAD: u64 = 100 * 1024 * 1024;
+
+#[derive(Deserialize)]
+struct AutoUploadQuery {
+    name: String,
+}
+
+pub fn upload_token_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(token.trim().as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `POST /api/auto-upload?name=IMG_1.HEIC` with `Authorization: Bearer <key>` and the file
+/// as the body. No cookie, no page: made for an iPhone Shortcut that sends new photos.
+/// A file already there (same name and size in its month) is skipped, so the Shortcut
+/// can send "photos of the last days" again and again.
+async fn auto_upload(State(app): State<App>, headers: HeaderMap, Query(q): Query<AutoUploadQuery>, body: Body) -> Response {
+    let ip = auth::client_ip(&headers);
+    let Some(expected) = app.upload_token_hash() else { return not_found() };
+    if let Err(wait) = app.auth.check_allowed(&ip) {
+        let mins = wait.as_secs().div_ceil(60);
+        return error(StatusCode::TOO_MANY_REQUESTS, &format!("Слишком много попыток. Попробуйте через {mins} мин."));
+    }
+    let given = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).unwrap_or("");
+    if given.is_empty() || upload_token_hash(given) != expected {
+        app.auth.record_failure(&ip);
+        crate::log!("Автозагрузка: неверный ключ (адрес: {ip})");
+        return error(StatusCode::UNAUTHORIZED, "Неверный ключ загрузки");
+    }
+    let name = storage::sanitize_filename(&q.name);
+    let length = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    if let Ok(free) = fs4::available_space(&app.paths.uploads) {
+        if length.saturating_add(DISK_RESERVE) > free {
+            return error(StatusCode::INSUFFICIENT_STORAGE, "Не хватает места на диске");
+        }
+    }
+
+    let tmp = app.paths.uploads.join(format!("{}.part", auth::random_hex(16)));
+    let written = async {
+        use futures_util::StreamExt;
+        let mut file = tokio::fs::File::create(&tmp).await?;
+        let mut stream = body.into_data_stream();
+        let mut total = 0u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(std::io::Error::other)?;
+            total += chunk.len() as u64;
+            if total > MAX_AUTO_UPLOAD {
+                return Err(std::io::Error::other("файл больше 100 МБ"));
+            }
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+        file.sync_all().await?;
+        Ok::<u64, std::io::Error>(total)
+    }
+    .await;
+    let size = match written {
+        Ok(n) if n > 0 => n,
+        Ok(_) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return error(StatusCode::BAD_REQUEST, "Пустой файл");
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return error(StatusCode::BAD_REQUEST, &format!("Файл не принят: {e}"));
+        }
+    };
+
+    let _guard = app.place_lock.lock().await;
+    let storage_root = app.paths.storage.clone();
+    let placed = tokio::task::spawn_blocking(move || {
+        let (section, folder, date) = date_place(&tmp, &name, 0);
+        let existing = folder.split('/').fold(storage_root.join(section.dir_name()), |p, part| p.join(part)).join(&name);
+        if std::fs::metadata(&existing).is_ok_and(|m| m.len() == size) {
+            let _ = std::fs::remove_file(&tmp);
+            return Ok((section, format!("{folder}/{name}"), true));
+        }
+        let res = move_into(&storage_root, section, &folder, &tmp, &name, date);
+        if res.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        res.map(|(s, rel)| (s, rel, false))
+    })
+    .await;
+    match placed {
+        Ok(Ok((section, rel, duplicate))) => {
+            if !duplicate {
+                crate::log!("Автозагрузка: {}/{rel}", section.dir_name());
+            }
+            Json(json!({ "section": section.id(), "path": rel, "duplicate": duplicate })).into_response()
+        }
+        Ok(Err(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Не удалось сохранить: {e:#}")),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось сохранить"),
+    }
 }
