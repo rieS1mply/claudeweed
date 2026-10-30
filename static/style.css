@@ -412,6 +412,11 @@ a.btn { color: inherit; text-decoration: none; }
   .seg:not(.static), .hide-sm, .lb-nav { display: none; }
   .seg.static { width: 190px; }
   .nav.titled .brand { opacity: 0; }
+  /* The buttons fill the middle of a phone's bar: the small title takes the brand's place. */
+  .nav-title {
+    left: 16px; translate: 0 -50%; transform-origin: left center;
+    max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   .page-head { padding-left: 16px; padding-right: 16px; }
   .search { max-width: none; }
   /* The sort menu yields to "Выбрать" on a narrow screen instead of pushing it off the edge. */
